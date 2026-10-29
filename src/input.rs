@@ -1,6 +1,8 @@
 // Author: David M. Anderson
 // Built with AI assistance (Claude, Anthropic)
 
+use crate::mouse::{self, Mouse, Parse};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AltKey {
     Up,
@@ -37,6 +39,7 @@ impl AltKey {
 pub enum Token {
     Bytes(Vec<u8>),
     AltKey(AltKey),
+    Mouse(Mouse),
 }
 
 #[derive(Default)]
@@ -54,21 +57,20 @@ impl Scanner {
         let mut i = 0;
         while i < buf.len() {
             if buf[i] == 0x1b {
-                let rest = &buf[i..];
-                if let Some(key) = AltKey::ALL
-                    .into_iter()
-                    .find(|k| rest.starts_with(k.bytes()))
-                {
-                    push_bytes(&mut tokens, &buf[run_start..i]);
-                    tokens.push(Token::AltKey(key));
-                    i += key.bytes().len();
-                    run_start = i;
-                    continue;
-                }
-                if AltKey::ALL.iter().any(|k| k.bytes().starts_with(rest)) {
-                    push_bytes(&mut tokens, &buf[run_start..i]);
-                    self.pending = rest.to_vec();
-                    return tokens;
+                match recognize(&buf[i..]) {
+                    Recognized::Token(token, len) => {
+                        push_bytes(&mut tokens, &buf[run_start..i]);
+                        tokens.push(token);
+                        i += len;
+                        run_start = i;
+                        continue;
+                    }
+                    Recognized::Incomplete => {
+                        push_bytes(&mut tokens, &buf[run_start..i]);
+                        self.pending = buf[i..].to_vec();
+                        return tokens;
+                    }
+                    Recognized::Nothing => {}
                 }
             }
             i += 1;
@@ -83,6 +85,29 @@ impl Scanner {
 
     pub fn flush(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending)
+    }
+}
+
+enum Recognized {
+    Token(Token, usize),
+    Incomplete,
+    Nothing,
+}
+
+fn recognize(rest: &[u8]) -> Recognized {
+    if let Some(key) = AltKey::ALL
+        .into_iter()
+        .find(|k| rest.starts_with(k.bytes()))
+    {
+        return Recognized::Token(Token::AltKey(key), key.bytes().len());
+    }
+    match mouse::parse_sgr(rest) {
+        Parse::Complete(mouse, len) => Recognized::Token(Token::Mouse(mouse), len),
+        Parse::Incomplete => Recognized::Incomplete,
+        Parse::NotMouse if AltKey::ALL.iter().any(|k| k.bytes().starts_with(rest)) => {
+            Recognized::Incomplete
+        }
+        Parse::NotMouse => Recognized::Nothing,
     }
 }
 
@@ -102,6 +127,14 @@ mod tests {
             .flat_map(|token| match token {
                 Token::Bytes(bytes) => bytes.clone(),
                 Token::AltKey(key) => key.bytes().to_vec(),
+                Token::Mouse(mouse) => mouse
+                    .encode(
+                        mouse.col,
+                        mouse.row,
+                        vt100::MouseProtocolMode::AnyMotion,
+                        vt100::MouseProtocolEncoding::Sgr,
+                    )
+                    .unwrap(),
             })
             .collect()
     }
@@ -111,7 +144,7 @@ mod tests {
             .iter()
             .filter_map(|token| match token {
                 Token::AltKey(key) => Some(*key),
-                Token::Bytes(_) => None,
+                Token::Bytes(_) | Token::Mouse(_) => None,
             })
             .collect()
     }
@@ -180,6 +213,32 @@ mod tests {
     }
 
     #[test]
+    fn mouse_reports_between_text() {
+        let mut scanner = Scanner::default();
+        let tokens = scanner.feed(b"a\x1b[<0;12;3Mb\x1b[<0;12;3m");
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0], Token::Bytes(b"a".to_vec()));
+        assert!(matches!(tokens[1], Token::Mouse(m) if m.pressed && m.col == 11 && m.row == 2));
+        assert_eq!(tokens[2], Token::Bytes(b"b".to_vec()));
+        assert!(matches!(tokens[3], Token::Mouse(m) if !m.pressed));
+    }
+
+    #[test]
+    fn mouse_report_split_at_every_point() {
+        let input = b"x\x1b[<32;101;40My";
+        for split in 0..=input.len() {
+            let (tokens, leftover) = feed_chunks(&[&input[..split], &input[split..]]);
+            let reports = tokens
+                .iter()
+                .filter(|t| matches!(t, Token::Mouse(_)))
+                .count();
+            assert_eq!(reports, 1, "split at {split}");
+            assert_eq!(reassemble(&tokens), input, "split at {split}");
+            assert!(leftover.is_empty());
+        }
+    }
+
+    #[test]
     fn lone_esc_is_held_then_flushed() {
         let mut scanner = Scanner::default();
         assert!(scanner.feed(b"\x1b").is_empty());
@@ -227,6 +286,7 @@ mod tests {
             b"\x1b[5;5~",
             b"\x1b[6;2~",
             b"\x1b[5;3A",
+            b"\x1b[<1;2X",
             b"\x1b[200~text\x1b[201~",
         ];
         for input in similar {

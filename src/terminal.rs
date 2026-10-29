@@ -12,15 +12,21 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+const MOUSE_ON: &[u8] = b"\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
+
 pub fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    stdout.write_all(MOUSE_ON)?;
     Ok(Terminal::new(CrosstermBackend::new(io::stdout()))?)
 }
 
 pub fn restore() {
     let mut stdout = io::stdout();
     let _ = stdout.write_all(&InputModes::default().transition_from(InputModes::ALL_ON));
+    let _ = stdout.write_all(MOUSE_OFF);
     let _ = execute!(stdout, Show, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }

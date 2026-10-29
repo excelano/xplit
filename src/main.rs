@@ -1,8 +1,11 @@
 // Author: David M. Anderson
 // Built with AI assistance (Claude, Anthropic)
 
+mod clipboard;
 mod input;
+mod mouse;
 mod pane;
+mod selection;
 mod terminal;
 
 use std::io::{self, ErrorKind, Read, Stdout, Write};
@@ -22,13 +25,17 @@ use signal_hook::consts::{SIGHUP, SIGTERM, SIGWINCH};
 use signal_hook::iterator::Signals;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
+use clipboard::Target;
 use input::{AltKey, Scanner, Token};
-use pane::{Pane, Scroll};
+use mouse::{Button, Mouse, MouseKind};
+use pane::Pane;
+use selection::{Point, Selection};
 use terminal::InputModes;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ESC_TIMEOUT: Duration = Duration::from_millis(10);
 const CHROME_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
+const CTRL_C: u8 = 0x03;
 
 pub enum Event {
     Input(Vec<u8>),
@@ -36,6 +43,7 @@ pub enum Event {
     Redraw,
     Resize,
     Exited(usize),
+    Paste(usize, Vec<u8>),
     Quit,
 }
 
@@ -87,14 +95,22 @@ struct App {
     scanner: Scanner,
     redraw_requested: Arc<AtomicBool>,
     input_modes: InputModes,
+    pane_areas: Vec<Rect>,
+    selection: Option<Selection>,
+    selecting: bool,
+    events: Sender<Event>,
 }
 
 impl App {
     fn handle_input(&mut self, bytes: &[u8]) {
         for token in self.scanner.feed(bytes) {
             match token {
+                Token::Bytes(bytes) if bytes == [CTRL_C] && self.selection.is_some() => {
+                    self.copy_selection();
+                }
                 Token::Bytes(bytes) => self.write_focused(&bytes),
                 Token::AltKey(key) => self.handle_alt_key(key),
+                Token::Mouse(mouse) => self.handle_mouse(mouse),
             }
         }
     }
@@ -106,26 +122,124 @@ impl App {
             self.focus = target;
             return;
         }
-        let scroll = match key {
-            AltKey::PageUp => Some(Scroll::Up),
-            AltKey::PageDown => Some(Scroll::Down),
+        let pane = &mut self.panes[self.focus];
+        let lines = match key {
+            AltKey::PageUp => Some(pane.page()),
+            AltKey::PageDown => Some(-pane.page()),
             _ => None,
         };
-        if let Some(scroll) = scroll
-            && self.panes[self.focus].scroll(scroll)
+        if let Some(lines) = lines
+            && pane.scroll(lines)
         {
+            self.selection = None;
             return;
         }
         self.write_focused(key.bytes());
     }
 
+    fn handle_mouse(&mut self, mouse: Mouse) {
+        let kind = mouse.kind();
+        if self.selecting {
+            match kind {
+                MouseKind::Drag(Button::Left) => return self.extend_selection(mouse),
+                MouseKind::Release(Button::Left) => {
+                    self.extend_selection(mouse);
+                    return self.finish_selection();
+                }
+                _ => {}
+            }
+        }
+        let position = Position::new(mouse.col, mouse.row);
+        let Some(index) = self
+            .pane_areas
+            .iter()
+            .position(|area| area.contains(position))
+        else {
+            return;
+        };
+        let area = self.pane_areas[index];
+        let (col, row) = (mouse.col - area.x, mouse.row - area.y);
+        let pane = &mut self.panes[index];
+        match kind {
+            MouseKind::WheelUp | MouseKind::WheelDown => {
+                pane.wheel(mouse, col, row, kind == MouseKind::WheelUp);
+                if self
+                    .selection
+                    .is_some_and(|selection| selection.pane == pane.id)
+                {
+                    self.selection = None;
+                }
+            }
+            MouseKind::Press(Button::Right) if self.selection.is_some() => self.copy_selection(),
+            MouseKind::Press(Button::Left) if mouse.ctrl() || !pane.wants_mouse() => {
+                self.selection = Some(Selection::new(pane.id, Point { row, col }));
+                self.selecting = true;
+                self.focus = index;
+            }
+            MouseKind::Press(Button::Middle) if !pane.wants_mouse() => {
+                clipboard::paste_primary(pane.id, self.events.clone());
+                self.focus = index;
+            }
+            _ => {
+                pane.forward_mouse(mouse, col, row);
+                if let MouseKind::Press(_) = kind {
+                    self.selection = None;
+                    self.focus = index;
+                }
+            }
+        }
+    }
+
+    fn extend_selection(&mut self, mouse: Mouse) {
+        let Some(selection) = self.selection.as_mut() else {
+            return;
+        };
+        let Some(area) = self
+            .panes
+            .iter()
+            .position(|pane| pane.id == selection.pane)
+            .and_then(|index| self.pane_areas.get(index))
+        else {
+            return;
+        };
+        selection.extend(Point {
+            row: mouse.row.clamp(area.top(), area.bottom().saturating_sub(1)) - area.top(),
+            col: mouse.col.clamp(area.left(), area.right().saturating_sub(1)) - area.left(),
+        });
+    }
+
+    fn finish_selection(&mut self) {
+        self.selecting = false;
+        if self.selection.is_some_and(|selection| selection.is_empty()) {
+            self.selection = None;
+        } else if let Some(text) = self.selected_text() {
+            clipboard::copy(text, Target::Primary);
+        }
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let pane = self.panes.iter().find(|pane| pane.id == selection.pane)?;
+        Some(selection.text(pane.parser().screen())).filter(|text| !text.trim().is_empty())
+    }
+
+    fn copy_selection(&mut self) {
+        if let Some(text) = self.selected_text() {
+            clipboard::copy(text, Target::Clipboard);
+        }
+        self.selection = None;
+    }
+
     fn write_focused(&mut self, bytes: &[u8]) {
+        self.selection = None;
         self.panes[self.focus].write(bytes);
     }
 
     fn close(&mut self, id: usize) {
         if let Some(index) = self.panes.iter().position(|pane| pane.id == id) {
             self.panes.remove(index).reap();
+            self.selection = None;
+            self.selecting = false;
             if self.focus > index || self.focus >= self.panes.len() {
                 self.focus = self.focus.saturating_sub(1);
             }
@@ -140,6 +254,8 @@ impl App {
             split,
             panes,
             focus,
+            pane_areas: stored_areas,
+            selection,
             ..
         } = self;
         let mut input_modes = InputModes::default();
@@ -152,6 +268,18 @@ impl App {
                 let widget = PseudoTerminal::new(parser.screen())
                     .cursor(Cursor::default().visibility(false));
                 frame.render_widget(widget, *pane_area);
+                if let Some(selection) = selection.filter(|selection| selection.pane == pane.id) {
+                    let buf = frame.buffer_mut();
+                    for position in pane_area.positions() {
+                        let point = Point {
+                            row: position.y - pane_area.y,
+                            col: position.x - pane_area.x,
+                        };
+                        if selection.contains(point) {
+                            buf[position].modifier.toggle(Modifier::REVERSED);
+                        }
+                    }
+                }
                 let scrolled = parser.screen().scrollback();
                 if scrolled > 0 {
                     let label = format!("+{scrolled}");
@@ -185,6 +313,8 @@ impl App {
                 ));
             }
             input_modes = InputModes::of(screen);
+            drop(parser);
+            *stored_areas = pane_areas;
         })?;
 
         if input_modes != self.input_modes {
@@ -269,6 +399,10 @@ fn run(split: Split) -> Result<()> {
         scanner: Scanner::default(),
         redraw_requested,
         input_modes: InputModes::default(),
+        pane_areas: Vec::new(),
+        selection: None,
+        selecting: false,
+        events,
     };
     let result = event_loop(&mut app, receiver);
     for pane in &mut app.panes {
@@ -324,7 +458,17 @@ fn event_loop(app: &mut App, receiver: Receiver<Event>) -> Result<()> {
                     .has_pending()
                     .then(|| Instant::now() + ESC_TIMEOUT);
             }
-            Event::Redraw | Event::Resize => needs_draw = true,
+            Event::Redraw => needs_draw = true,
+            Event::Resize => {
+                app.selection = None;
+                needs_draw = true;
+            }
+            Event::Paste(id, bytes) => {
+                if let Some(pane) = app.panes.iter_mut().find(|pane| pane.id == id) {
+                    pane.paste(&bytes);
+                }
+                needs_draw = true;
+            }
             Event::Exited(id) => {
                 app.close(id);
                 if app.panes.is_empty() {

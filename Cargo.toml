@@ -28,6 +28,7 @@ its shell exits."""
 section = "utils"
 priority = "optional"
 depends = "libc6, libgcc-s1"
+recommends = "wl-clipboard | xclip"
 assets = [
     ["target/release/xplit", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/xplit/README.md", "644"],

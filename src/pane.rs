@@ -11,14 +11,10 @@ use anyhow::Result;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::Event;
+use crate::mouse::Mouse;
 
 const SCROLLBACK_LINES: usize = 10_000;
-
-#[derive(Clone, Copy)]
-pub enum Scroll {
-    Up,
-    Down,
-}
+const WHEEL_LINES: u8 = 3;
 
 pub struct Pane {
     pub id: usize,
@@ -84,6 +80,20 @@ impl Pane {
 
     pub fn write(&mut self, bytes: &[u8]) {
         self.parser().screen_mut().set_scrollback(0);
+        self.send(bytes);
+    }
+
+    pub fn paste(&mut self, text: &[u8]) {
+        if !self.parser().screen().bracketed_paste() {
+            return self.write(text);
+        }
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend(text.iter().filter(|&&byte| byte != 0x1b));
+        bytes.extend_from_slice(b"\x1b[201~");
+        self.write(&bytes);
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
         let _ = self
             .writer
             .write_all(bytes)
@@ -103,19 +113,61 @@ impl Pane {
         let _ = self.master.resize(pty_size(size));
     }
 
-    pub fn scroll(&mut self, scroll: Scroll) -> bool {
+    pub fn page(&self) -> i32 {
+        self.size.0.into()
+    }
+
+    pub fn scroll(&mut self, lines: i32) -> bool {
         let mut parser = self.parser();
         let screen = parser.screen_mut();
         if screen.alternate_screen() {
             return false;
         }
-        let page = usize::from(self.size.0);
-        let offset = match scroll {
-            Scroll::Up => screen.scrollback() + page,
-            Scroll::Down => screen.scrollback().saturating_sub(page),
-        };
-        screen.set_scrollback(offset);
+        screen.set_scrollback(screen.scrollback().saturating_add_signed(lines as isize));
         true
+    }
+
+    pub fn wants_mouse(&self) -> bool {
+        self.parser().screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None
+    }
+
+    pub fn forward_mouse(&mut self, mouse: Mouse, col: u16, row: u16) {
+        if let Some(bytes) = self.encode_mouse(mouse, col, row) {
+            self.send(&bytes);
+        }
+    }
+
+    pub fn wheel(&mut self, mouse: Mouse, col: u16, row: u16, up: bool) {
+        if let Some(bytes) = self.encode_mouse(mouse, col, row) {
+            self.send(&bytes);
+            return;
+        }
+        let lines = if up {
+            i32::from(WHEEL_LINES)
+        } else {
+            -i32::from(WHEEL_LINES)
+        };
+        if self.scroll(lines) {
+            return;
+        }
+        let key: &[u8] = match (up, self.parser().screen().application_cursor()) {
+            (true, true) => b"\x1bOA",
+            (true, false) => b"\x1b[A",
+            (false, true) => b"\x1bOB",
+            (false, false) => b"\x1b[B",
+        };
+        self.send(&key.repeat(usize::from(WHEEL_LINES)));
+    }
+
+    fn encode_mouse(&self, mouse: Mouse, col: u16, row: u16) -> Option<Vec<u8>> {
+        let parser = self.parser();
+        let screen = parser.screen();
+        mouse.encode(
+            col,
+            row,
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding(),
+        )
     }
 
     pub fn parser(&self) -> MutexGuard<'_, vt100::Parser> {
