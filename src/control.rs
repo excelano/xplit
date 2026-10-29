@@ -12,7 +12,8 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::{Event, Split};
+use crate::Event;
+use crate::layout::Split;
 
 pub const SOCKET_VAR: &str = "XPLIT_SOCKET";
 pub const PANE_VAR: &str = "XPLIT_PANE";

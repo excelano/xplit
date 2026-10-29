@@ -4,6 +4,7 @@
 mod clipboard;
 mod control;
 mod input;
+mod layout;
 mod mouse;
 mod pane;
 mod selection;
@@ -19,10 +20,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 use std::{panic, process, thread};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use signal_hook::consts::{SIGHUP, SIGTERM, SIGWINCH};
 use signal_hook::iterator::Signals;
@@ -31,6 +32,7 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use clipboard::Target;
 use control::{Reply, Request, Server, Verb};
 use input::{AltKey, Scanner, Token};
+use layout::{Areas, Node, Split};
 use mouse::{Button, Mouse, MouseKind};
 use pane::{Pane, Spawner};
 use selection::{Point, Selection};
@@ -54,55 +56,15 @@ pub enum Event {
     Quit,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Split {
-    SideBySide,
-    Stacked,
-}
-
-impl Split {
-    fn focus_target(self, key: AltKey) -> Option<usize> {
-        match (self, key) {
-            (Split::SideBySide, AltKey::Left) | (Split::Stacked, AltKey::Up) => Some(0),
-            (Split::SideBySide, AltKey::Right) | (Split::Stacked, AltKey::Down) => Some(1),
-            _ => None,
-        }
-    }
-
-    fn areas(self, area: Rect, pane_count: usize) -> (Vec<Rect>, Option<Rect>) {
-        if pane_count < 2 {
-            return (vec![area], None);
-        }
-        let constraints = [
-            Constraint::Fill(1),
-            Constraint::Length(1),
-            Constraint::Fill(1),
-        ];
-        let layout = match self {
-            Split::SideBySide => Layout::horizontal(constraints),
-            Split::Stacked => Layout::vertical(constraints),
-        };
-        let [first, divider, second] = layout.areas(area);
-        (vec![first, second], Some(divider))
-    }
-
-    fn divider_symbol(self) -> &'static str {
-        match self {
-            Split::SideBySide => "│",
-            Split::Stacked => "─",
-        }
-    }
-}
-
 struct App {
     terminal: Terminal<CrosstermBackend<Stdout>>,
-    split: Split,
+    layout: Option<Node>,
     panes: Vec<Pane>,
     focus: usize,
     scanner: Scanner,
     input_modes: InputModes,
     area: Rect,
-    pane_areas: Vec<Rect>,
+    areas: Areas,
     selection: Option<Selection>,
     selecting: bool,
     spawner: Spawner,
@@ -110,41 +72,89 @@ struct App {
 
 impl App {
     fn start(&mut self, request: &Request) -> Result<()> {
-        if let Verb::Split(split) = request.verb {
-            self.split = split;
-            self.open(request, &[])?;
+        match request.verb {
+            Verb::Solo => self.open(request, &request.command, None),
+            Verb::Split(split) => {
+                self.open(request, &[], None)?;
+                let first = self.focus;
+                self.open(request, &request.command, Some((first, split)))?;
+                if request.command.is_empty() {
+                    self.focus = first;
+                }
+                Ok(())
+            }
         }
-        self.open(request, &request.command)?;
-        if request.command.is_empty() {
-            self.focus = 0;
-        }
-        Ok(())
     }
 
-    fn open(&mut self, request: &Request, command: &[String]) -> Result<()> {
-        let (areas, _) = self.split.areas(self.area, self.panes.len() + 1);
-        let size = areas.last().map_or((1, 1), |area| grid_size(*area));
+    fn open(
+        &mut self,
+        request: &Request,
+        command: &[String],
+        place: Option<(usize, Split)>,
+    ) -> Result<()> {
+        let area = match place {
+            None => self.area,
+            Some((target, split)) => {
+                let Some(target_area) = self.current_areas().of(target) else {
+                    bail!("that pane is gone");
+                };
+                if !split.fits(target_area) {
+                    bail!("this pane is too small to split");
+                }
+                split.halves(target_area)[2]
+            }
+        };
         let pane = self
             .spawner
-            .spawn(size, &request.cwd, &request.env, command)?;
+            .spawn(grid_size(area), &request.cwd, &request.env, command)?;
+        let id = pane.id;
         self.panes.push(pane);
-        self.focus = self.panes.len() - 1;
+        match place {
+            Some((target, split)) => {
+                if let Some(layout) = &mut self.layout {
+                    layout.split(target, split, id);
+                }
+            }
+            None => self.layout = Some(Node::Pane(id)),
+        }
+        self.focus = id;
         Ok(())
     }
 
     fn handle_request(&mut self, request: Request) -> Result<(), String> {
         match request.verb {
             Verb::Solo => Err("already running inside xplit".to_string()),
-            Verb::Split(_) if self.panes.len() >= 2 => {
-                Err("this screen is already split".to_string())
-            }
             Verb::Split(split) => {
-                self.split = split;
+                let target = request
+                    .pane
+                    .filter(|id| self.panes.iter().any(|pane| pane.id == *id))
+                    .unwrap_or(self.focus);
                 self.selection = None;
-                self.open(&request, &request.command)
+                self.open(&request, &request.command, Some((target, split)))
                     .map_err(|error| format!("{error:#}"))
             }
         }
+    }
+
+    fn current_areas(&self) -> Areas {
+        self.layout
+            .as_ref()
+            .map(|layout| layout.areas(self.area))
+            .unwrap_or_default()
+    }
+
+    fn focused(&mut self) -> Option<&mut Pane> {
+        self.panes.iter_mut().find(|pane| pane.id == self.focus)
+    }
+
+    fn cursor_position(&self) -> Position {
+        let area = self.areas.of(self.focus).unwrap_or_default();
+        let (row, col) = self
+            .panes
+            .iter()
+            .find(|pane| pane.id == self.focus)
+            .map_or((0, 0), |pane| pane.parser().screen().cursor_position());
+        Position::new(area.x + col, area.y + row)
     }
 
     fn handle_input(&mut self, bytes: &[u8]) {
@@ -161,13 +171,14 @@ impl App {
     }
 
     fn handle_alt_key(&mut self, key: AltKey) {
-        if self.panes.len() == 2
-            && let Some(target) = self.split.focus_target(key)
-        {
+        let anchor = self.cursor_position();
+        if let Some(target) = layout::neighbor(&self.areas, self.focus, key, anchor) {
             self.focus = target;
             return;
         }
-        let pane = &mut self.panes[self.focus];
+        let Some(pane) = self.focused() else {
+            return;
+        };
         let lines = match key {
             AltKey::PageUp => Some(pane.page()),
             AltKey::PageDown => Some(-pane.page()),
@@ -194,42 +205,35 @@ impl App {
                 _ => {}
             }
         }
-        let position = Position::new(mouse.col, mouse.row);
-        let Some(index) = self
-            .pane_areas
-            .iter()
-            .position(|area| area.contains(position))
-        else {
+        let Some((id, area)) = self.areas.at(Position::new(mouse.col, mouse.row)) else {
             return;
         };
-        let area = self.pane_areas[index];
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == id) else {
+            return;
+        };
         let (col, row) = (mouse.col - area.x, mouse.row - area.y);
-        let pane = &mut self.panes[index];
         match kind {
             MouseKind::WheelUp | MouseKind::WheelDown => {
                 pane.wheel(mouse, col, row, kind == MouseKind::WheelUp);
-                if self
-                    .selection
-                    .is_some_and(|selection| selection.pane == pane.id)
-                {
+                if self.selection.is_some_and(|selection| selection.pane == id) {
                     self.selection = None;
                 }
             }
             MouseKind::Press(Button::Right) if self.selection.is_some() => self.copy_selection(),
             MouseKind::Press(Button::Left) if mouse.ctrl() || !pane.wants_mouse() => {
-                self.selection = Some(Selection::new(pane.id, Point { row, col }));
+                self.selection = Some(Selection::new(id, Point { row, col }));
                 self.selecting = true;
-                self.focus = index;
+                self.focus = id;
             }
             MouseKind::Press(Button::Middle) if !pane.wants_mouse() => {
-                clipboard::paste_primary(pane.id, self.spawner.events.clone());
-                self.focus = index;
+                clipboard::paste_primary(id, self.spawner.events.clone());
+                self.focus = id;
             }
             _ => {
                 pane.forward_mouse(mouse, col, row);
                 if let MouseKind::Press(_) = kind {
                     self.selection = None;
-                    self.focus = index;
+                    self.focus = id;
                 }
             }
         }
@@ -239,12 +243,7 @@ impl App {
         let Some(selection) = self.selection.as_mut() else {
             return;
         };
-        let Some(area) = self
-            .panes
-            .iter()
-            .position(|pane| pane.id == selection.pane)
-            .and_then(|index| self.pane_areas.get(index))
-        else {
+        let Some(area) = self.areas.of(selection.pane) else {
             return;
         };
         selection.extend(Point {
@@ -277,17 +276,26 @@ impl App {
 
     fn write_focused(&mut self, bytes: &[u8]) {
         self.selection = None;
-        self.panes[self.focus].write(bytes);
+        if let Some(pane) = self.focused() {
+            pane.write(bytes);
+        }
     }
 
     fn close(&mut self, id: usize) {
-        if let Some(index) = self.panes.iter().position(|pane| pane.id == id) {
-            self.panes.remove(index).reap();
-            self.selection = None;
-            self.selecting = false;
-            if self.focus > index || self.focus >= self.panes.len() {
-                self.focus = self.focus.saturating_sub(1);
-            }
+        let Some(index) = self.panes.iter().position(|pane| pane.id == id) else {
+            return;
+        };
+        let closed_area = self.areas.of(id);
+        self.panes.remove(index).reap();
+        self.layout = self.layout.take().and_then(|layout| layout.without(id));
+        self.selection = None;
+        self.selecting = false;
+        if self.focus == id {
+            let areas = self.current_areas();
+            let successor = closed_area
+                .and_then(|area| areas.at(area.as_position()))
+                .or_else(|| areas.panes.first().copied());
+            self.focus = successor.map_or(0, |(id, _)| id);
         }
     }
 
@@ -298,25 +306,31 @@ impl App {
 
         let App {
             terminal,
-            split,
+            layout,
             panes,
             focus,
             area: stored_area,
-            pane_areas: stored_areas,
+            areas: stored_areas,
             selection,
             ..
         } = self;
         let mut input_modes = InputModes::default();
 
         terminal.draw(|frame| {
-            let (pane_areas, divider) = split.areas(frame.area(), panes.len());
-            for (pane, pane_area) in panes.iter_mut().zip(&pane_areas) {
-                pane.resize(grid_size(*pane_area));
+            let areas = layout
+                .as_ref()
+                .map(|layout| layout.areas(frame.area()))
+                .unwrap_or_default();
+            for &(id, pane_area) in &areas.panes {
+                let Some(pane) = panes.iter_mut().find(|pane| pane.id == id) else {
+                    continue;
+                };
+                pane.resize(grid_size(pane_area));
                 let parser = pane.parser();
                 let widget = PseudoTerminal::new(parser.screen())
                     .cursor(Cursor::default().visibility(false));
-                frame.render_widget(widget, *pane_area);
-                if let Some(selection) = selection.filter(|selection| selection.pane == pane.id) {
+                frame.render_widget(widget, pane_area);
+                if let Some(selection) = selection.filter(|selection| selection.pane == id) {
                     let buf = frame.buffer_mut();
                     for position in pane_area.positions() {
                         let point = Point {
@@ -342,27 +356,29 @@ impl App {
                     }
                 }
             }
-            if let Some(divider) = divider {
-                let buf = frame.buffer_mut();
+            let buf = frame.buffer_mut();
+            for &(split, divider) in &areas.dividers {
                 for position in divider.positions() {
                     buf[position]
                         .set_symbol(split.divider_symbol())
                         .set_style(CHROME_STYLE);
                 }
             }
-            let parser = panes[*focus].parser();
-            let screen = parser.screen();
-            let focused_area = pane_areas[*focus];
-            if !screen.hide_cursor() && screen.scrollback() == 0 {
-                let (row, col) = screen.cursor_position();
-                frame.set_cursor_position((
-                    focused_area.x + col.min(focused_area.width.saturating_sub(1)),
-                    focused_area.y + row.min(focused_area.height.saturating_sub(1)),
-                ));
+            if let Some(pane) = panes.iter().find(|pane| pane.id == *focus)
+                && let Some(focused_area) = areas.of(*focus)
+            {
+                let parser = pane.parser();
+                let screen = parser.screen();
+                if !screen.hide_cursor() && screen.scrollback() == 0 {
+                    let (row, col) = screen.cursor_position();
+                    frame.set_cursor_position((
+                        focused_area.x + col.min(focused_area.width.saturating_sub(1)),
+                        focused_area.y + row.min(focused_area.height.saturating_sub(1)),
+                    ));
+                }
+                input_modes = InputModes::of(screen);
             }
-            input_modes = InputModes::of(screen);
-            drop(parser);
-            *stored_areas = pane_areas;
+            *stored_areas = areas;
             *stored_area = frame.area();
         })?;
 
@@ -457,13 +473,13 @@ fn run(request: &Request) -> Result<()> {
     let area = Rect::from((Position::ORIGIN, terminal.size()?));
     let mut app = App {
         terminal,
-        split: Split::SideBySide,
+        layout: None,
         panes: Vec::new(),
         focus: 0,
         scanner: Scanner::default(),
         input_modes: InputModes::default(),
         area,
-        pane_areas: Vec::new(),
+        areas: Areas::default(),
         selection: None,
         selecting: false,
         spawner: Spawner::new(events, Arc::new(AtomicBool::new(false)), socket),

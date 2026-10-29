@@ -21,23 +21,22 @@ xplit down htop        # a shell on top, htop below
 xplit -- down          # run a program that happens to be called down
 ```
 
-Each pane runs `$SHELL` (or `/bin/bash` when it is unset) with `TERM=xterm-256color`, unless it was opened with a command, in which case it runs that command. When whatever a pane runs ends, by `exit`, Ctrl+D or anything else, the pane closes and the other one takes the full window. When the last pane closes, xplit puts the terminal back as it found it and exits. Resizing the window resizes both panes.
+Each pane runs `$SHELL` (or `/bin/bash` when it is unset) with `TERM=xterm-256color`, unless it was opened with a command, in which case it runs that command. When whatever a pane runs ends, by `exit`, Ctrl+D or anything else, the pane closes and the pane it was split from takes back its space. When the last pane closes, xplit puts the terminal back as it found it and exits. Resizing the window resizes every pane.
 
 ### Inside xplit
 
-Typed in one of its own panes, `xplit` does not start a second copy. It asks the xplit it is running in to split the pane you typed in: that pane stays on the left (or on top, with `down`), and the new pane opens beside it with the focus, in the directory and with the environment of the shell you typed in. A command after the verb runs in the new pane, so `xplit claude` from inside a pane opens Claude Code next to it. A screen holds two panes; once it is split, `xplit` says so and does nothing, and `xplit solo` refuses because you are already in xplit.
+Typed in one of its own panes, `xplit` does not start a second copy. It asks the xplit it is running in to split the pane you typed in: that pane stays on the left (or on top, with `down`), and the new pane opens beside it with the focus, in the directory and with the environment of the shell you typed in. A command after the verb runs in the new pane, so `xplit claude` from inside a pane opens Claude Code next to it. Any pane can be split again, in either direction, so a screen can hold as many panes as fit; xplit refuses a split that would leave a half too small to use. `xplit solo` refuses because you are already in xplit.
 
 To have a window that starts in xplit without changing every terminal, give GNOME Terminal a second profile (Preferences, then the + beside Profiles) whose Command tab runs `xplit solo` as a custom command instead of the shell, and open it from the new-tab menu or with `gnome-terminal --profile=<name>`. It looks like an ordinary shell until you type `xplit`.
 
 ## Keys
 
-| Layout       | Keys                     | Action                       |
-|--------------|--------------------------|------------------------------|
-| side by side | Alt+Left / Alt+Right     | focus the left or right pane |
-| stacked      | Alt+Up / Alt+Down        | focus the top or bottom pane |
-| either       | Alt+PageUp / Alt+PageDown | scroll the focused pane back or forward a page |
+| Keys                      | Action                                          |
+|---------------------------|-------------------------------------------------|
+| Alt+arrow                 | focus the next pane in that direction           |
+| Alt+PageUp / Alt+PageDown | scroll the focused pane back or forward a page  |
 
-Every other key goes to the focused pane unchanged, including Ctrl+C, Ctrl+Z, Esc and bracketed paste. The Alt+arrow pair that does not belong to the current layout is passed through to the shell too, and so are all Alt+arrows once only one pane is left. Only the focused pane shows a cursor.
+Alt+arrow moves to the nearest pane on that side, and where several panes border it, to the one level with the cursor. When there is no pane in that direction, the key goes to the program in the focused pane, so Alt+arrows still reach the shell whenever they have nowhere to move. Every other key goes to the focused pane unchanged, including Ctrl+C, Ctrl+Z, Esc and bracketed paste. Only the focused pane shows a cursor.
 
 ## Mouse and copying
 
