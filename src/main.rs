@@ -2,13 +2,16 @@
 // Built with AI assistance (Claude, Anthropic)
 
 mod clipboard;
+mod control;
 mod input;
 mod mouse;
 mod pane;
 mod selection;
 mod terminal;
 
+use std::env;
 use std::io::{self, ErrorKind, Read, Stdout, Write};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,9 +29,10 @@ use signal_hook::iterator::Signals;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use clipboard::Target;
+use control::{Reply, Request, Server, Verb};
 use input::{AltKey, Scanner, Token};
 use mouse::{Button, Mouse, MouseKind};
-use pane::Pane;
+use pane::{Pane, Spawner};
 use selection::{Point, Selection};
 use terminal::InputModes;
 
@@ -36,6 +40,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ESC_TIMEOUT: Duration = Duration::from_millis(10);
 const CHROME_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
 const CTRL_C: u8 = 0x03;
+const USAGE: &str =
+    "usage: xplit [down | solo] [command [args...]]\n       xplit -- command [args...]";
 
 pub enum Event {
     Input(Vec<u8>),
@@ -44,11 +50,12 @@ pub enum Event {
     Resize,
     Exited(usize),
     Paste(usize, Vec<u8>),
+    Request(Request, Reply),
     Quit,
 }
 
-#[derive(Clone, Copy)]
-enum Split {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Split {
     SideBySide,
     Stacked,
 }
@@ -93,15 +100,53 @@ struct App {
     panes: Vec<Pane>,
     focus: usize,
     scanner: Scanner,
-    redraw_requested: Arc<AtomicBool>,
     input_modes: InputModes,
+    area: Rect,
     pane_areas: Vec<Rect>,
     selection: Option<Selection>,
     selecting: bool,
-    events: Sender<Event>,
+    spawner: Spawner,
 }
 
 impl App {
+    fn start(&mut self, request: &Request) -> Result<()> {
+        if let Verb::Split(split) = request.verb {
+            self.split = split;
+            self.open(request, &[])?;
+        }
+        self.open(request, &request.command)?;
+        if request.command.is_empty() {
+            self.focus = 0;
+        }
+        Ok(())
+    }
+
+    fn open(&mut self, request: &Request, command: &[String]) -> Result<()> {
+        let (areas, _) = self.split.areas(self.area, self.panes.len() + 1);
+        let size = areas.last().map_or((1, 1), |area| grid_size(*area));
+        let pane = self
+            .spawner
+            .spawn(size, &request.cwd, &request.env, command)?;
+        self.panes.push(pane);
+        self.focus = self.panes.len() - 1;
+        Ok(())
+    }
+
+    fn handle_request(&mut self, request: Request) -> Result<(), String> {
+        match request.verb {
+            Verb::Solo => Err("already running inside xplit".to_string()),
+            Verb::Split(_) if self.panes.len() >= 2 => {
+                Err("this screen is already split".to_string())
+            }
+            Verb::Split(split) => {
+                self.split = split;
+                self.selection = None;
+                self.open(&request, &request.command)
+                    .map_err(|error| format!("{error:#}"))
+            }
+        }
+    }
+
     fn handle_input(&mut self, bytes: &[u8]) {
         for token in self.scanner.feed(bytes) {
             match token {
@@ -177,7 +222,7 @@ impl App {
                 self.focus = index;
             }
             MouseKind::Press(Button::Middle) if !pane.wants_mouse() => {
-                clipboard::paste_primary(pane.id, self.events.clone());
+                clipboard::paste_primary(pane.id, self.spawner.events.clone());
                 self.focus = index;
             }
             _ => {
@@ -247,13 +292,16 @@ impl App {
     }
 
     fn draw(&mut self) -> Result<()> {
-        self.redraw_requested.store(false, Ordering::Release);
+        self.spawner
+            .redraw_requested
+            .store(false, Ordering::Release);
 
         let App {
             terminal,
             split,
             panes,
             focus,
+            area: stored_area,
             pane_areas: stored_areas,
             selection,
             ..
@@ -315,6 +363,7 @@ impl App {
             input_modes = InputModes::of(screen);
             drop(parser);
             *stored_areas = pane_areas;
+            *stored_area = frame.area();
         })?;
 
         if input_modes != self.input_modes {
@@ -328,15 +377,43 @@ impl App {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let split = match args.as_slice() {
-        [] => Split::SideBySide,
-        [arg] if arg == "down" => Split::Stacked,
-        _ => {
-            eprintln!("usage: xplit [down]");
-            return ExitCode::from(2);
+    let args: Vec<String> = env::args().skip(1).collect();
+    if let [arg] = args.as_slice()
+        && (arg == "-h" || arg == "--help")
+    {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    let Some((verb, command)) = control::parse_args(&args) else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("xplit: {error}");
+            return ExitCode::FAILURE;
         }
     };
+    let request = Request {
+        verb,
+        command,
+        cwd,
+        env: env::vars_os().collect(),
+        pane: env::var(control::PANE_VAR)
+            .ok()
+            .and_then(|pane| pane.parse().ok()),
+    };
+    if let Some(socket) = env::var_os(control::SOCKET_VAR) {
+        match control::send(Path::new(&socket), &request) {
+            Ok(Ok(())) => return ExitCode::SUCCESS,
+            Ok(Err(message)) => {
+                eprintln!("xplit: {message}");
+                return ExitCode::FAILURE;
+            }
+            Err(_) => {}
+        }
+    }
 
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -345,7 +422,7 @@ fn main() -> ExitCode {
         process::exit(101);
     }));
 
-    let result = run(split);
+    let result = run(&request);
     terminal::restore();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -356,7 +433,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(split: Split) -> Result<()> {
+fn run(request: &Request) -> Result<()> {
     let (events, receiver) = mpsc::channel();
     let mut signals = Signals::new([SIGWINCH, SIGTERM, SIGHUP])?;
     let terminal = terminal::setup()?;
@@ -375,36 +452,25 @@ fn run(split: Split) -> Result<()> {
         }
     });
 
-    let redraw_requested = Arc::new(AtomicBool::new(false));
+    let server = Server::start(events.clone());
+    let socket = server.as_ref().map(|server| server.path().to_path_buf());
     let area = Rect::from((Position::ORIGIN, terminal.size()?));
-    let (pane_areas, _) = split.areas(area, 2);
-    let panes = pane_areas
-        .iter()
-        .enumerate()
-        .map(|(id, pane_area)| {
-            Pane::spawn(
-                id,
-                grid_size(*pane_area),
-                events.clone(),
-                Arc::clone(&redraw_requested),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-
     let mut app = App {
         terminal,
-        split,
-        panes,
+        split: Split::SideBySide,
+        panes: Vec::new(),
         focus: 0,
         scanner: Scanner::default(),
-        redraw_requested,
         input_modes: InputModes::default(),
+        area,
         pane_areas: Vec::new(),
         selection: None,
         selecting: false,
-        events,
+        spawner: Spawner::new(events, Arc::new(AtomicBool::new(false)), socket),
     };
-    let result = event_loop(&mut app, receiver);
+    let result = app
+        .start(request)
+        .and_then(|()| event_loop(&mut app, receiver));
     for pane in &mut app.panes {
         pane.hang_up();
     }
@@ -461,6 +527,10 @@ fn event_loop(app: &mut App, receiver: Receiver<Event>) -> Result<()> {
             Event::Redraw => needs_draw = true,
             Event::Resize => {
                 app.selection = None;
+                needs_draw = true;
+            }
+            Event::Request(request, reply) => {
+                let _ = reply.send(app.handle_request(request));
                 needs_draw = true;
             }
             Event::Paste(id, bytes) => {

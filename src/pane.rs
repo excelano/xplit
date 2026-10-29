@@ -1,16 +1,21 @@
 // Author: David M. Anderson
 // Built with AI assistance (Claude, Anthropic)
 
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::Event;
+use crate::control;
 use crate::mouse::Mouse;
 
 const SCROLLBACK_LINES: usize = 10_000;
@@ -25,21 +30,96 @@ pub struct Pane {
     child: Box<dyn Child + Send + Sync>,
 }
 
-impl Pane {
-    pub fn spawn(
-        id: usize,
-        size: (u16, u16),
+pub struct Spawner {
+    pub events: Sender<Event>,
+    pub redraw_requested: Arc<AtomicBool>,
+    pub socket: Option<PathBuf>,
+    next_id: usize,
+}
+
+impl Spawner {
+    pub fn new(
         events: Sender<Event>,
         redraw_requested: Arc<AtomicBool>,
+        socket: Option<PathBuf>,
+    ) -> Spawner {
+        Spawner {
+            events,
+            redraw_requested,
+            socket,
+            next_id: 0,
+        }
+    }
+
+    pub fn spawn(
+        &mut self,
+        size: (u16, u16),
+        cwd: &Path,
+        env: &[(OsString, OsString)],
+        program: &[String],
+    ) -> Result<Pane> {
+        if let [name, ..] = program {
+            let path = env
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.as_os_str());
+            if !is_runnable(name, path, cwd) {
+                bail!("{name}: command not found");
+            }
+        }
+        let id = self.next_id;
+        let pane = Pane::spawn(id, size, self.command(id, cwd, env, program), self)?;
+        self.next_id += 1;
+        Ok(pane)
+    }
+
+    fn command(
+        &self,
+        id: usize,
+        cwd: &Path,
+        env: &[(OsString, OsString)],
+        program: &[String],
+    ) -> CommandBuilder {
+        let shell = env
+            .iter()
+            .find(|(key, _)| key == "SHELL")
+            .map_or_else(|| "/bin/bash".into(), |(_, value)| value.clone());
+        let mut command = match program {
+            [] => CommandBuilder::new(shell),
+            argv => CommandBuilder::from_argv(argv.iter().map(Into::into).collect()),
+        };
+        command.env_clear();
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command.cwd(cwd);
+        command.env("TERM", "xterm-256color");
+        match &self.socket {
+            Some(socket) => {
+                command.env(control::SOCKET_VAR, socket);
+                command.env(control::PANE_VAR, id.to_string());
+            }
+            None => {
+                command.env_remove(control::SOCKET_VAR);
+                command.env_remove(control::PANE_VAR);
+            }
+        }
+        command
+    }
+}
+
+impl Pane {
+    fn spawn(
+        id: usize,
+        size: (u16, u16),
+        command: CommandBuilder,
+        spawner: &Spawner,
     ) -> Result<Pane> {
         let pair = native_pty_system().openpty(pty_size(size))?;
-
-        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/bash".into());
-        let mut command = CommandBuilder::new(shell);
-        command.cwd(std::env::current_dir()?);
-        command.env("TERM", "xterm-256color");
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
+        let events = spawner.events.clone();
+        let redraw_requested = Arc::clone(&spawner.redraw_requested);
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(
             size.0,
@@ -190,4 +270,22 @@ fn pty_size((rows, cols): (u16, u16)) -> PtySize {
         pixel_width: 0,
         pixel_height: 0,
     }
+}
+
+fn is_runnable(name: &str, path: Option<&OsStr>, cwd: &Path) -> bool {
+    let candidates: Vec<PathBuf> = if name.contains('/') {
+        vec![cwd.join(name)]
+    } else {
+        path.map(|path| {
+            env::split_paths(path)
+                .map(|dir| cwd.join(dir).join(name))
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+    candidates.iter().any(|candidate| {
+        candidate
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    })
 }

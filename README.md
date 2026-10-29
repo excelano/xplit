@@ -13,11 +13,21 @@ cargo install --path .
 ## Usage
 
 ```sh
-xplit        # two panes side by side
-xplit down   # two panes stacked top and bottom
+xplit                  # two panes side by side
+xplit down             # two panes stacked top and bottom
+xplit solo             # one pane, ready to split
+xplit claude           # a shell on the left, claude on the right
+xplit down htop        # a shell on top, htop below
+xplit -- down          # run a program that happens to be called down
 ```
 
-Each pane runs `$SHELL` (or `/bin/bash` when it is unset) in the directory xplit was started from, with `TERM=xterm-256color`. When a pane's shell ends, by `exit`, Ctrl+D or anything else, the pane closes and the other one takes the full window. When the last pane closes, xplit puts the terminal back as it found it and exits. Resizing the window resizes both panes.
+Each pane runs `$SHELL` (or `/bin/bash` when it is unset) with `TERM=xterm-256color`, unless it was opened with a command, in which case it runs that command. When whatever a pane runs ends, by `exit`, Ctrl+D or anything else, the pane closes and the other one takes the full window. When the last pane closes, xplit puts the terminal back as it found it and exits. Resizing the window resizes both panes.
+
+### Inside xplit
+
+Typed in one of its own panes, `xplit` does not start a second copy. It asks the xplit it is running in to split the pane you typed in: that pane stays on the left (or on top, with `down`), and the new pane opens beside it with the focus, in the directory and with the environment of the shell you typed in. A command after the verb runs in the new pane, so `xplit claude` from inside a pane opens Claude Code next to it. A screen holds two panes; once it is split, `xplit` says so and does nothing, and `xplit solo` refuses because you are already in xplit.
+
+To have a window that starts in xplit without changing every terminal, give GNOME Terminal a second profile (Preferences, then the + beside Profiles) whose Command tab runs `xplit solo` as a custom command instead of the shell, and open it from the new-tab menu or with `gnome-terminal --profile=<name>`. It looks like an ordinary shell until you type `xplit`.
 
 ## Keys
 
