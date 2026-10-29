@@ -1,6 +1,6 @@
 [package]
 name = "xplit"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "A minimal terminal splitter with no prefix key and no configuration"
 authors = ["David M. Anderson"]
