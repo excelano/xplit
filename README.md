@@ -47,7 +47,7 @@ Alt+arrow moves to the nearest pane on that side, and where several panes border
 
 ## Mouse and copying
 
-xplit handles the mouse itself, so a selection stays inside the pane it started in. Drag to select; the selection stops at the pane's edges, and soft-wrapped lines come back joined. Copy it to the clipboard with a right-click, or with Ctrl+C while the selection is showing; with nothing selected, Ctrl+C goes to the shell as an interrupt as usual. Finishing a drag also sets the primary selection, and a middle-click pastes the primary selection into the pane under the mouse. Typing, clicking, scrolling or resizing clears the selection.
+xplit handles the mouse itself, so a selection stays inside the pane it started in. Drag to select; the selection stays inside the pane, dragging past its top or bottom edge scrolls the pane to extend the selection, and soft-wrapped lines come back joined. The selection stays on its text as output scrolls the pane, except in a pane whose scrollback is full, where new output clears it. Copy it to the clipboard with a right-click, or with Ctrl+C while the selection is showing; with nothing selected, Ctrl+C goes to the shell as an interrupt as usual. Finishing a drag also sets the primary selection, and a middle-click pastes the primary selection into the pane under the mouse. Typing, clicking or resizing clears the selection.
 
 Clicking a pane focuses it. The wheel scrolls the pane under the mouse through its scrollback, and in a full-screen program without mouse support it sends arrow keys, so less and man scroll with it. Programs that ask for the mouse, such as htop and vim with `mouse=a`, receive clicks, drags and the wheel at the right place in their pane. To select text in one of those, hold Ctrl while dragging. Shift+drag still makes GNOME Terminal's own selection, which runs across both panes.
 
@@ -59,13 +59,10 @@ Each pane keeps the last 10,000 lines that scrolled off its top. While a pane is
 
 ## Behavior to know about
 
-xplit reports mouse movement to programs only while a button is held, so a program that tracks the pointer as it hovers sees no hover events. Programs that query the terminal (for its cursor position or its identity) get no answer and fall back to their defaults.
+xplit reports mouse movement to programs only while a button is held, so a program that tracks the pointer as it hovers sees no hover events. The focused pane's window title and cursor shape are passed on to GNOME Terminal, and a bell in any pane rings it. Programs that query the terminal (for its cursor position or its identity) get no answer and fall back to their defaults.
 
 ## Ideas for later
 
-- Scrolling the pane while a drag selection runs past its top or bottom edge.
-- Keeping a selection attached to its text when new output scrolls the pane, rather than to its position on screen.
-- Passing cursor shape, the bell, and window title changes through from the focused pane to the real terminal.
+- Copying to the clipboard when a program in a pane asks to through OSC 52, which GNOME Terminal itself ignores.
 - Answering terminal queries such as cursor position reports from each pane's emulated screen.
-- Non-blocking writes to the panes, so a program that stops reading input cannot stall keystrokes bound for the other pane.
 - A keyboard way to move the divider off the halfway mark.

@@ -42,6 +42,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ESC_TIMEOUT: Duration = Duration::from_millis(10);
 const CHROME_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
 const CTRL_C: u8 = 0x03;
+const BEL: u8 = 0x07;
+const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
 const HIDE_OUTSIDE: &str = "hide only works inside xplit";
 const USAGE: &str = "usage: xplit [down | solo | tray] [command [args...]]\n       xplit hide\n       xplit -- command [args...]";
 
@@ -76,6 +78,9 @@ struct App {
     areas: Areas,
     selection: Option<Selection>,
     selecting: bool,
+    autoscroll: Option<Mouse>,
+    title: Option<String>,
+    cursor_shape: u16,
     spawner: Spawner,
 }
 
@@ -270,7 +275,6 @@ impl App {
         if let Some(lines) = lines
             && pane.scroll(lines)
         {
-            self.selection = None;
             return;
         }
         self.write_focused(key.bytes());
@@ -305,13 +309,16 @@ impl App {
         match kind {
             MouseKind::WheelUp | MouseKind::WheelDown => {
                 pane.wheel(mouse, col, row, kind == MouseKind::WheelUp);
-                if self.selection.is_some_and(|selection| selection.pane == id) {
-                    self.selection = None;
-                }
             }
             MouseKind::Press(Button::Right) if self.selection.is_some() => self.copy_selection(),
             MouseKind::Press(Button::Left) if mouse.ctrl() || !pane.wants_mouse() => {
-                self.selection = Some(Selection::new(id, Point { row, col }));
+                let at = Point {
+                    line: pane.top_line() + usize::from(row),
+                    col,
+                };
+                let selection =
+                    Selection::new(id, at, pane.alternate_screen(), pane.output_count());
+                self.selection = Some(selection);
                 self.selecting = true;
                 self.focus = id;
             }
@@ -336,14 +343,48 @@ impl App {
         let Some(area) = self.areas.of(selection.pane) else {
             return;
         };
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == selection.pane) else {
+            return;
+        };
+        let edge = if mouse.row < area.top() {
+            1
+        } else if mouse.row >= area.bottom() {
+            -1
+        } else {
+            0
+        };
+        self.autoscroll = (edge != 0).then_some(mouse);
+        if edge != 0 {
+            pane.scroll(edge);
+        }
+        let row = mouse.row.clamp(area.top(), area.bottom().saturating_sub(1)) - area.top();
         selection.extend(Point {
-            row: mouse.row.clamp(area.top(), area.bottom().saturating_sub(1)) - area.top(),
+            line: pane.top_line() + usize::from(row),
             col: mouse.col.clamp(area.left(), area.right().saturating_sub(1)) - area.left(),
         });
     }
 
+    fn check_selection(&mut self) {
+        let Some(selection) = self.selection.as_mut() else {
+            return;
+        };
+        let Some(pane) = self.panes.iter().find(|pane| pane.id == selection.pane) else {
+            self.selection = None;
+            return;
+        };
+        let output = pane.output_count();
+        let lost = pane.alternate_screen() != selection.alternate
+            || (output != selection.output && pane.scrollback_full());
+        if lost {
+            self.selection = None;
+        } else {
+            selection.output = output;
+        }
+    }
+
     fn finish_selection(&mut self) {
         self.selecting = false;
+        self.autoscroll = None;
         if self.selection.is_some_and(|selection| selection.is_empty()) {
             self.selection = None;
         } else if let Some(text) = self.selected_text() {
@@ -354,7 +395,9 @@ impl App {
     fn selected_text(&self) -> Option<String> {
         let selection = self.selection?;
         let pane = self.panes.iter().find(|pane| pane.id == selection.pane)?;
-        Some(selection.text(pane.parser().screen())).filter(|text| !text.trim().is_empty())
+        let cols = self.areas.of(selection.pane)?.width;
+        let text = selection.text(cols, |line, start, end| pane.line_text(line, start, end));
+        Some(text).filter(|text| !text.trim().is_empty())
     }
 
     fn copy_selection(&mut self) {
@@ -404,6 +447,7 @@ impl App {
     }
 
     fn draw(&mut self) -> Result<()> {
+        self.check_selection();
         self.spawner
             .redraw_requested
             .store(false, Ordering::Release);
@@ -421,6 +465,9 @@ impl App {
             ..
         } = self;
         let mut input_modes = InputModes::default();
+        let mut title = None;
+        let mut cursor_shape = 0;
+        let mut bell = false;
 
         terminal.draw(|frame| {
             let areas = layout::screen(layout.as_ref(), *tray, hidden, frame.area());
@@ -429,7 +476,9 @@ impl App {
                     continue;
                 };
                 pane.resize(grid_size(pane_area));
-                let parser = pane.parser();
+                let top = pane.top_line();
+                let mut parser = pane.parser();
+                bell |= std::mem::take(&mut parser.callbacks_mut().bell);
                 let widget = PseudoTerminal::new(parser.screen())
                     .cursor(Cursor::default().visibility(false));
                 frame.render_widget(widget, pane_area);
@@ -437,7 +486,7 @@ impl App {
                     let buf = frame.buffer_mut();
                     for position in pane_area.positions() {
                         let point = Point {
-                            row: position.y - pane_area.y,
+                            line: top + usize::from(position.y - pane_area.y),
                             col: position.x - pane_area.x,
                         };
                         if selection.contains(point) {
@@ -490,16 +539,30 @@ impl App {
                     ));
                 }
                 input_modes = InputModes::of(screen);
+                title = parser.callbacks().title.clone();
+                cursor_shape = parser.callbacks().cursor_shape;
             }
             *stored_areas = areas;
             *stored_area = frame.area();
         })?;
 
-        if input_modes != self.input_modes {
+        let mut outward = input_modes.transition_from(self.input_modes);
+        self.input_modes = input_modes;
+        if let Some(title) = title.filter(|title| Some(title) != self.title.as_ref()) {
+            outward.extend_from_slice(format!("\x1b]2;{title}\x07").as_bytes());
+            self.title = Some(title);
+        }
+        if cursor_shape != self.cursor_shape {
+            outward.extend_from_slice(format!("\x1b[{cursor_shape} q").as_bytes());
+            self.cursor_shape = cursor_shape;
+        }
+        if bell {
+            outward.push(BEL);
+        }
+        if !outward.is_empty() {
             let backend = self.terminal.backend_mut();
-            backend.write_all(&input_modes.transition_from(self.input_modes))?;
+            backend.write_all(&outward)?;
             backend.flush()?;
-            self.input_modes = input_modes;
         }
         Ok(())
     }
@@ -601,6 +664,9 @@ fn run(request: &Request) -> Result<()> {
         areas: Areas::default(),
         selection: None,
         selecting: false,
+        autoscroll: None,
+        title: None,
+        cursor_shape: 0,
         spawner: Spawner::new(events, Arc::new(AtomicBool::new(false)), socket),
     };
     let result = app
@@ -616,6 +682,7 @@ fn event_loop(app: &mut App, receiver: Receiver<Event>) -> Result<()> {
     let mut needs_draw = true;
     let mut last_draw: Option<Instant> = None;
     let mut esc_deadline: Option<Instant> = None;
+    let mut autoscroll_deadline: Option<Instant> = None;
 
     loop {
         let now = Instant::now();
@@ -624,6 +691,17 @@ fn event_loop(app: &mut App, receiver: Receiver<Event>) -> Result<()> {
             app.write_focused(&held);
             esc_deadline = None;
         }
+        if autoscroll_deadline.is_some_and(|deadline| now >= deadline)
+            && let Some(mouse) = app.autoscroll
+        {
+            app.extend_selection(mouse);
+            needs_draw = true;
+        }
+        autoscroll_deadline = match (app.autoscroll, autoscroll_deadline) {
+            (None, _) => None,
+            (Some(_), Some(deadline)) if now < deadline => Some(deadline),
+            (Some(_), _) => Some(now + AUTOSCROLL_INTERVAL),
+        };
         let next_frame = last_draw.map(|at| at + FRAME_INTERVAL);
         if needs_draw && next_frame.is_none_or(|at| now >= at) {
             app.draw()?;
@@ -636,7 +714,11 @@ fn event_loop(app: &mut App, receiver: Receiver<Event>) -> Result<()> {
         } else {
             None
         };
-        let event = match esc_deadline.into_iter().chain(draw_deadline).min() {
+        let deadline = [esc_deadline, draw_deadline, autoscroll_deadline]
+            .into_iter()
+            .flatten()
+            .min();
+        let event = match deadline {
             Some(deadline) => {
                 match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                     Ok(event) => event,

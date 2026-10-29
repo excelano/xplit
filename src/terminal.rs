@@ -14,6 +14,7 @@ use ratatui::backend::CrosstermBackend;
 
 const MOUSE_ON: &[u8] = b"\x1b[?1002h\x1b[?1006h";
 const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
+const DEFAULT_CURSOR: &[u8] = b"\x1b[0 q";
 
 pub fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
@@ -27,6 +28,7 @@ pub fn restore() {
     let mut stdout = io::stdout();
     let _ = stdout.write_all(&InputModes::default().transition_from(InputModes::ALL_ON));
     let _ = stdout.write_all(MOUSE_OFF);
+    let _ = stdout.write_all(DEFAULT_CURSOR);
     let _ = execute!(stdout, Show, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
