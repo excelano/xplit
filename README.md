@@ -39,6 +39,7 @@ xplit down htop        # a shell on top, htop below
 xplit tray             # a shell, with a five-row tray across the bottom
 xplit tray htop        # the same, with htop in the tray
 xplit hide             # inside xplit: fold away the pane you typed it in
+xplit focus            # inside xplit: fold away every pane but this one, or bring them back
 xplit -- down          # run a program that happens to be called down
 ```
 
@@ -51,6 +52,8 @@ Typed in one of its own panes, `xplit` does not start a second copy. It asks the
 `xplit tray` adds a tray: a pane five rows tall across the full width of the screen, under every other pane however they are split. A screen has at most one. Typed again while a tray exists, `xplit tray` moves the focus to it (bringing it back if it is hidden), and with a command it says the screen already has one. The tray cannot be split, and when every other pane has closed it takes over the screen.
 
 `xplit hide` folds the pane you typed it in down to a dim dashed line (`┆` or `┄`) along its edge, and the pane beside it takes the space. What runs in a hidden pane keeps running at the size it had, so it never sees a resize. Alt+arrow toward the dashed line, or a click on it, brings the pane back with the focus. When both halves of a split are hidden they fold into one line and come back together. The last visible pane cannot be hidden.
+
+`xplit focus` hides every pane except the one you typed it in, the tray included, so that pane fills the screen with the others folded into dashed lines along its edges. Typed again while every other pane is hidden, it brings back every hidden pane at once; Alt+arrow or a click still brings them back one fold at a time. The tray cannot be focused alone.
 
 To have a window that starts in xplit without changing every terminal, give GNOME Terminal a second profile (Preferences, then the + beside Profiles) whose Command tab runs `xplit solo` as a custom command instead of the shell, and open it from the new-tab menu or with `gnome-terminal --profile=<name>`. It looks like an ordinary shell until you type `xplit`.
 

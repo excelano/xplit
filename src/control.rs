@@ -25,16 +25,18 @@ pub enum Verb {
     Split(Split),
     Solo,
     Hide,
+    Focus,
     Tray,
 }
 
 impl Verb {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Verb::Split(Split::SideBySide) => "right",
             Verb::Split(Split::Stacked) => "down",
             Verb::Solo => "solo",
             Verb::Hide => "hide",
+            Verb::Focus => "focus",
             Verb::Tray => "tray",
         }
     }
@@ -45,6 +47,7 @@ impl Verb {
             "down" => Some(Verb::Split(Split::Stacked)),
             "solo" => Some(Verb::Solo),
             "hide" => Some(Verb::Hide),
+            "focus" => Some(Verb::Focus),
             "tray" => Some(Verb::Tray),
             _ => None,
         }
@@ -69,8 +72,10 @@ pub fn parse_args(args: &[String]) -> Option<(Verb, Vec<String>)> {
             (!rest.is_empty()).then(|| (Verb::Split(Split::SideBySide), rest.to_vec()))
         }
         [first, ..] if first.starts_with('-') => None,
-        [first] if first == "hide" => Some((Verb::Hide, Vec::new())),
-        [first, ..] if first == "hide" => None,
+        [first] if first == "hide" || first == "focus" => {
+            Some((Verb::from_name(first)?, Vec::new()))
+        }
+        [first, ..] if first == "hide" || first == "focus" => None,
         [first, rest @ ..] => match first.as_str() {
             "down" | "solo" | "tray" => {
                 let verb = Verb::from_name(first)?;
@@ -215,6 +220,7 @@ mod tests {
         assert_eq!(parse_args(&args(&["down"])), Some((down, vec![])));
         assert_eq!(parse_args(&args(&["solo"])), Some((Verb::Solo, vec![])));
         assert_eq!(parse_args(&args(&["hide"])), Some((Verb::Hide, vec![])));
+        assert_eq!(parse_args(&args(&["focus"])), Some((Verb::Focus, vec![])));
         assert_eq!(
             parse_args(&args(&["tray", "htop"])),
             Some((Verb::Tray, args(&["htop"])))
@@ -243,6 +249,7 @@ mod tests {
         assert_eq!(parse_args(&args(&["-x", "vim"])), None);
         assert_eq!(parse_args(&args(&["--"])), None);
         assert_eq!(parse_args(&args(&["hide", "vim"])), None);
+        assert_eq!(parse_args(&args(&["focus", "vim"])), None);
     }
 
     #[test]

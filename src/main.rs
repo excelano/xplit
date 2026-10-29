@@ -44,8 +44,8 @@ const CHROME_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
 const CTRL_C: u8 = 0x03;
 const BEL: u8 = 0x07;
 const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
-const HIDE_OUTSIDE: &str = "hide only works inside xplit";
-const USAGE: &str = "usage: xplit [down | solo | tray] [command [args...]]\n       xplit hide\n       xplit -- command [args...]";
+const INSIDE_ONLY: &str = "only works inside xplit";
+const USAGE: &str = "usage: xplit [down | solo | tray] [command [args...]]\n       xplit hide | focus\n       xplit -- command [args...]";
 
 pub enum Event {
     Input(Vec<u8>),
@@ -87,7 +87,7 @@ struct App {
 impl App {
     fn start(&mut self, request: &Request) -> Result<()> {
         match request.verb {
-            Verb::Hide => bail!(HIDE_OUTSIDE),
+            Verb::Hide | Verb::Focus => bail!("{} {INSIDE_ONLY}", request.verb.name()),
             Verb::Solo => self.open(request, &request.command, Place::Root),
             Verb::Split(_) | Verb::Tray => {
                 self.open(request, &[], Place::Root)?;
@@ -144,6 +144,7 @@ impl App {
         match request.verb {
             Verb::Solo => Err("already running inside xplit".to_string()),
             Verb::Hide => self.hide(request.pane.unwrap_or(self.focus)),
+            Verb::Focus => self.toggle_focus(request.pane.unwrap_or(self.focus)),
             Verb::Tray => match self.tray {
                 Some(_) if !request.command.is_empty() => {
                     Err("this screen already has a tray".to_string())
@@ -193,6 +194,31 @@ impl App {
         }
         if self.focus == id {
             self.focus_where(hidden_area);
+        }
+        Ok(())
+    }
+
+    fn toggle_focus(&mut self, id: usize) -> Result<(), String> {
+        if !self.panes.iter().any(|pane| pane.id == id) {
+            return Err("that pane is gone".to_string());
+        }
+        if self.tray == Some(id) {
+            return Err("the tray cannot be focused alone".to_string());
+        }
+        let others: Vec<usize> = self
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .filter(|other| *other != id && !self.hidden.contains(other))
+            .collect();
+        self.focus = id;
+        if others.is_empty() {
+            self.hidden.clear();
+            return Ok(());
+        }
+        self.hidden.extend(others);
+        if self.selection.is_some_and(|selection| selection.pane != id) {
+            self.selection = None;
         }
         Ok(())
     }
@@ -606,8 +632,8 @@ fn main() -> ExitCode {
             Err(_) => {}
         }
     }
-    if verb == Verb::Hide {
-        eprintln!("xplit: {HIDE_OUTSIDE}");
+    if matches!(verb, Verb::Hide | Verb::Focus) {
+        eprintln!("xplit: {} {INSIDE_ONLY}", verb.name());
         return ExitCode::FAILURE;
     }
 
