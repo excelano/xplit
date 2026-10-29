@@ -7,9 +7,9 @@ mod terminal;
 
 use std::io::{self, ErrorKind, Read, Stdout, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 use std::{panic, process, thread};
 
@@ -128,19 +128,20 @@ impl App {
     fn draw(&mut self) -> Result<()> {
         self.redraw_requested.store(false, Ordering::Release);
 
-        let area = Rect::from((Position::ORIGIN, self.terminal.size()?));
-        let (pane_areas, divider) = self.split.areas(area, self.panes.len());
-        for (pane, pane_area) in self.panes.iter_mut().zip(&pane_areas) {
-            pane.resize(grid_size(*pane_area));
-        }
+        let App {
+            terminal,
+            split,
+            panes,
+            focus,
+            ..
+        } = self;
+        let mut input_modes = InputModes::default();
 
-        let parsers: Vec<MutexGuard<vt100::Parser>> = self.panes.iter().map(Pane::parser).collect();
-        let focused_screen = parsers[self.focus].screen();
-        let focused_area = pane_areas[self.focus];
-        let divider_symbol = self.split.divider_symbol();
-
-        self.terminal.draw(|frame| {
-            for (parser, pane_area) in parsers.iter().zip(&pane_areas) {
+        terminal.draw(|frame| {
+            let (pane_areas, divider) = split.areas(frame.area(), panes.len());
+            for (pane, pane_area) in panes.iter_mut().zip(&pane_areas) {
+                pane.resize(grid_size(*pane_area));
+                let parser = pane.parser();
                 let widget = PseudoTerminal::new(parser.screen())
                     .cursor(Cursor::default().visibility(false));
                 frame.render_widget(widget, *pane_area);
@@ -149,21 +150,23 @@ impl App {
                 let buf = frame.buffer_mut();
                 for position in divider.positions() {
                     buf[position]
-                        .set_symbol(divider_symbol)
+                        .set_symbol(split.divider_symbol())
                         .set_style(Style::new().add_modifier(Modifier::DIM));
                 }
             }
-            if !focused_screen.hide_cursor() {
-                let (row, col) = focused_screen.cursor_position();
+            let parser = panes[*focus].parser();
+            let screen = parser.screen();
+            let focused_area = pane_areas[*focus];
+            if !screen.hide_cursor() {
+                let (row, col) = screen.cursor_position();
                 frame.set_cursor_position((
                     focused_area.x + col.min(focused_area.width.saturating_sub(1)),
                     focused_area.y + row.min(focused_area.height.saturating_sub(1)),
                 ));
             }
+            input_modes = InputModes::of(screen);
         })?;
 
-        let input_modes = InputModes::of(focused_screen);
-        drop(parsers);
         if input_modes != self.input_modes {
             let backend = self.terminal.backend_mut();
             backend.write_all(&input_modes.transition_from(self.input_modes))?;
