@@ -43,7 +43,7 @@ const ESC_TIMEOUT: Duration = Duration::from_millis(10);
 const CHROME_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
 const CTRL_C: u8 = 0x03;
 const HIDE_OUTSIDE: &str = "hide only works inside xplit";
-const USAGE: &str = "usage: xplit [down | solo] [command [args...]]\n       xplit hide\n       xplit -- command [args...]";
+const USAGE: &str = "usage: xplit [down | solo | tray] [command [args...]]\n       xplit hide\n       xplit -- command [args...]";
 
 pub enum Event {
     Input(Vec<u8>),
@@ -56,9 +56,17 @@ pub enum Event {
     Quit,
 }
 
+#[derive(Clone, Copy)]
+enum Place {
+    Root,
+    Beside(usize, Split),
+    Tray,
+}
+
 struct App {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     layout: Option<Node>,
+    tray: Option<usize>,
     hidden: Vec<usize>,
     panes: Vec<Pane>,
     focus: usize,
@@ -75,11 +83,15 @@ impl App {
     fn start(&mut self, request: &Request) -> Result<()> {
         match request.verb {
             Verb::Hide => bail!(HIDE_OUTSIDE),
-            Verb::Solo => self.open(request, &request.command, None),
-            Verb::Split(split) => {
-                self.open(request, &[], None)?;
+            Verb::Solo => self.open(request, &request.command, Place::Root),
+            Verb::Split(_) | Verb::Tray => {
+                self.open(request, &[], Place::Root)?;
                 let first = self.focus;
-                self.open(request, &request.command, Some((first, split)))?;
+                let place = match request.verb {
+                    Verb::Split(split) => Place::Beside(first, split),
+                    _ => Place::Tray,
+                };
+                self.open(request, &request.command, place)?;
                 if request.command.is_empty() {
                     self.focus = first;
                 }
@@ -88,15 +100,14 @@ impl App {
         }
     }
 
-    fn open(
-        &mut self,
-        request: &Request,
-        command: &[String],
-        place: Option<(usize, Split)>,
-    ) -> Result<()> {
+    fn open(&mut self, request: &Request, command: &[String], place: Place) -> Result<()> {
         let area = match place {
-            None => self.area,
-            Some((target, split)) => {
+            Place::Root => self.area,
+            Place::Tray if !layout::fits_tray(self.area) => {
+                bail!("the window is too short for a tray")
+            }
+            Place::Tray => layout::tray_halves(self.area)[2],
+            Place::Beside(target, split) => {
                 let Some(target_area) = self.current_areas().of(target) else {
                     bail!("that pane is gone");
                 };
@@ -112,12 +123,13 @@ impl App {
         let id = pane.id;
         self.panes.push(pane);
         match place {
-            Some((target, split)) => {
+            Place::Root => self.layout = Some(Node::Pane(id)),
+            Place::Beside(target, split) => {
                 if let Some(layout) = &mut self.layout {
                     layout.split(target, split, id);
                 }
             }
-            None => self.layout = Some(Node::Pane(id)),
+            Place::Tray => self.tray = Some(id),
         }
         self.focus = id;
         Ok(())
@@ -127,25 +139,46 @@ impl App {
         match request.verb {
             Verb::Solo => Err("already running inside xplit".to_string()),
             Verb::Hide => self.hide(request.pane.unwrap_or(self.focus)),
+            Verb::Tray => match self.tray {
+                Some(_) if !request.command.is_empty() => {
+                    Err("this screen already has a tray".to_string())
+                }
+                Some(tray) if self.hidden.contains(&tray) => {
+                    self.restore(tray);
+                    Ok(())
+                }
+                Some(tray) => {
+                    self.focus = tray;
+                    Ok(())
+                }
+                None => self
+                    .open(&request, &request.command, Place::Tray)
+                    .map_err(|error| format!("{error:#}")),
+            },
             Verb::Split(split) => {
                 let target = request
                     .pane
                     .filter(|id| self.panes.iter().any(|pane| pane.id == *id))
                     .unwrap_or(self.focus);
+                if self.tray == Some(target) {
+                    return Err("the tray cannot be split".to_string());
+                }
                 self.selection = None;
-                self.open(&request, &request.command, Some((target, split)))
+                self.open(&request, &request.command, Place::Beside(target, split))
                     .map_err(|error| format!("{error:#}"))
             }
         }
     }
 
     fn hide(&mut self, id: usize) -> Result<(), String> {
-        let visible = self
+        let main_visible = self
             .panes
             .iter()
-            .filter(|pane| pane.id != id && !self.hidden.contains(&pane.id))
+            .filter(|pane| {
+                pane.id != id && Some(pane.id) != self.tray && !self.hidden.contains(&pane.id)
+            })
             .count();
-        if visible == 0 {
+        if self.tray != Some(id) && main_visible == 0 {
             return Err("cannot hide the only visible pane".to_string());
         }
         let hidden_area = self.current_areas().of(id);
@@ -186,10 +219,7 @@ impl App {
     }
 
     fn current_areas(&self) -> Areas {
-        self.layout
-            .as_ref()
-            .map(|layout| layout.areas(self.area, &self.hidden))
-            .unwrap_or_default()
+        layout::screen(self.layout.as_ref(), self.tray, &self.hidden, self.area)
     }
 
     fn focused(&mut self) -> Option<&mut Pane> {
@@ -349,13 +379,22 @@ impl App {
         self.panes.remove(index).reap();
         self.layout = self.layout.take().and_then(|layout| layout.without(id));
         self.hidden.retain(|hidden| *hidden != id);
-        if self.layout.as_ref().is_some_and(|layout| {
-            layout
+        if self.tray == Some(id) {
+            self.tray = None;
+        }
+        if self.layout.is_none()
+            && let Some(tray) = self.tray.take()
+        {
+            self.layout = Some(Node::Pane(tray));
+        }
+        if let Some(layout) = &self.layout
+            && layout
                 .leaves()
                 .iter()
                 .all(|leaf| self.hidden.contains(leaf))
-        }) {
-            self.hidden.clear();
+        {
+            let tray = self.tray;
+            self.hidden.retain(|hidden| Some(*hidden) == tray);
         }
         self.selection = None;
         self.selecting = false;
@@ -372,6 +411,7 @@ impl App {
         let App {
             terminal,
             layout,
+            tray,
             hidden,
             panes,
             focus,
@@ -383,10 +423,7 @@ impl App {
         let mut input_modes = InputModes::default();
 
         terminal.draw(|frame| {
-            let areas = layout
-                .as_ref()
-                .map(|layout| layout.areas(frame.area(), hidden))
-                .unwrap_or_default();
+            let areas = layout::screen(layout.as_ref(), *tray, hidden, frame.area());
             for &(id, pane_area) in &areas.panes {
                 let Some(pane) = panes.iter_mut().find(|pane| pane.id == id) else {
                     continue;
@@ -429,6 +466,9 @@ impl App {
                         .set_symbol(split.divider_symbol())
                         .set_style(CHROME_STYLE);
                 }
+            }
+            for (position, symbol) in layout::junctions(&areas.dividers) {
+                buf[position].set_symbol(symbol);
             }
             for sliver in &areas.slivers {
                 for position in sliver.area.positions() {
@@ -551,6 +591,7 @@ fn run(request: &Request) -> Result<()> {
     let mut app = App {
         terminal,
         layout: None,
+        tray: None,
         hidden: Vec::new(),
         panes: Vec::new(),
         focus: 0,

@@ -18,6 +18,8 @@ xplit down             # two panes stacked top and bottom
 xplit solo             # one pane, ready to split
 xplit claude           # a shell on the left, claude on the right
 xplit down htop        # a shell on top, htop below
+xplit tray             # a shell, with a five-row tray across the bottom
+xplit tray htop        # the same, with htop in the tray
 xplit hide             # inside xplit: fold away the pane you typed it in
 xplit -- down          # run a program that happens to be called down
 ```
@@ -27,6 +29,8 @@ Each pane runs `$SHELL` (or `/bin/bash` when it is unset) with `TERM=xterm-256co
 ### Inside xplit
 
 Typed in one of its own panes, `xplit` does not start a second copy. It asks the xplit it is running in to split the pane you typed in: that pane stays on the left (or on top, with `down`), and the new pane opens beside it with the focus, in the directory and with the environment of the shell you typed in. A command after the verb runs in the new pane, so `xplit claude` from inside a pane opens Claude Code next to it. Any pane can be split again, in either direction, so a screen can hold as many panes as fit; xplit refuses a split that would leave a half too small to use. `xplit solo` refuses because you are already in xplit.
+
+`xplit tray` adds a tray: a pane five rows tall across the full width of the screen, under every other pane however they are split. A screen has at most one. Typed again while a tray exists, `xplit tray` moves the focus to it (bringing it back if it is hidden), and with a command it says the screen already has one. The tray cannot be split, and when every other pane has closed it takes over the screen.
 
 `xplit hide` folds the pane you typed it in down to a dim dashed line (`┆` or `┄`) along its edge, and the pane beside it takes the space. What runs in a hidden pane keeps running at the size it had, so it never sees a resize. Alt+arrow toward the dashed line, or a click on it, brings the pane back with the focus. When both halves of a split are hidden they fold into one line and come back together. The last visible pane cannot be hidden.
 

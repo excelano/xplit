@@ -1,12 +1,15 @@
 // Author: David M. Anderson
 // Built with AI assistance (Claude, Anthropic)
 
+use std::collections::HashMap;
+
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 
 use crate::input::AltKey;
 
 const MIN_WIDTH: u16 = 10;
 const MIN_HEIGHT: u16 = 3;
+const TRAY_ROWS: u16 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Split {
@@ -215,6 +218,89 @@ impl Node {
     }
 }
 
+pub fn screen(layout: Option<&Node>, tray: Option<usize>, hidden: &[usize], area: Rect) -> Areas {
+    let mut main = area;
+    let mut tray_areas = Areas::default();
+    if let Some(tray) = tray {
+        if hidden.contains(&tray) {
+            let (sliver, rest) = Split::Stacked.peel(area, false);
+            main = rest;
+            tray_areas.slivers.push(Sliver {
+                panes: vec![tray],
+                split: Split::Stacked,
+                area: sliver,
+            });
+        } else {
+            let [rest, divider, tray_area] = tray_halves(area);
+            main = rest;
+            tray_areas.dividers.push((Split::Stacked, divider));
+            tray_areas.panes.push((tray, tray_area));
+        }
+    }
+    let mut areas = layout
+        .map(|layout| layout.areas(main, hidden))
+        .unwrap_or_default();
+    areas.panes.extend(tray_areas.panes);
+    areas.dividers.extend(tray_areas.dividers);
+    areas.slivers.extend(tray_areas.slivers);
+    areas
+}
+
+pub fn tray_halves(area: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(TRAY_ROWS),
+    ])
+    .areas(area)
+}
+
+pub fn fits_tray(area: Rect) -> bool {
+    area.height >= TRAY_ROWS + 1 + MIN_HEIGHT
+}
+
+pub fn junctions(dividers: &[(Split, Rect)]) -> Vec<(Position, &'static str)> {
+    let lines: HashMap<Position, Split> = dividers
+        .iter()
+        .flat_map(|&(split, area)| area.positions().map(move |position| (position, split)))
+        .collect();
+    let crosses = |position: Option<Position>, split: Split| {
+        position.is_some_and(|position| lines.get(&position) == Some(&split))
+    };
+    lines
+        .iter()
+        .filter_map(|(&at, &split)| {
+            let (before, after) = match split {
+                Split::SideBySide => (
+                    at.x.checked_sub(1).map(|x| Position::new(x, at.y)),
+                    Some(Position::new(at.x + 1, at.y)),
+                ),
+                Split::Stacked => (
+                    at.y.checked_sub(1).map(|y| Position::new(at.x, y)),
+                    Some(Position::new(at.x, at.y + 1)),
+                ),
+            };
+            let perpendicular = match split {
+                Split::SideBySide => Split::Stacked,
+                Split::Stacked => Split::SideBySide,
+            };
+            let symbol = match (
+                split,
+                crosses(before, perpendicular),
+                crosses(after, perpendicular),
+            ) {
+                (_, false, false) => return None,
+                (_, true, true) => "┼",
+                (Split::SideBySide, true, false) => "┤",
+                (Split::SideBySide, false, true) => "├",
+                (Split::Stacked, true, false) => "┴",
+                (Split::Stacked, false, true) => "┬",
+            };
+            Some((at, symbol))
+        })
+        .collect()
+}
+
 pub fn neighbor(areas: &Areas, from: usize, key: AltKey, anchor: Position) -> Option<usize> {
     let origin = areas.of(from)?;
     let ahead = |area: Rect| -> Option<u16> {
@@ -352,6 +438,40 @@ mod tests {
             Some(1)
         );
         assert_eq!(neighbor(&areas, 0, AltKey::Left, Position::new(0, 0)), None);
+    }
+
+    fn junction_map(dividers: &[(Split, Rect)]) -> HashMap<(u16, u16), &'static str> {
+        junctions(dividers)
+            .into_iter()
+            .map(|(position, symbol)| ((position.x, position.y), symbol))
+            .collect()
+    }
+
+    #[test]
+    fn junctions_where_dividers_meet() {
+        let quad = junction_map(&quad().areas(Rect::new(0, 0, 81, 21), &[]).dividers);
+        assert_eq!(quad, HashMap::from([((40, 10), "┼")]));
+
+        let mut tee = Node::Pane(0);
+        tee.split(0, Split::SideBySide, 1);
+        tee.split(0, Split::Stacked, 2);
+        let tee = junction_map(&tee.areas(Rect::new(0, 0, 81, 21), &[]).dividers);
+        assert_eq!(tee, HashMap::from([((40, 10), "┤")]));
+    }
+
+    #[test]
+    fn tray_runs_the_full_width_under_the_layout() {
+        let mut layout = Node::Pane(0);
+        layout.split(0, Split::SideBySide, 1);
+        let areas = screen(Some(&layout), Some(7), &[], Rect::new(0, 0, 81, 30));
+        assert_eq!(areas.of(7), Some(Rect::new(0, 25, 81, 5)));
+        assert_eq!(areas.of(0), Some(Rect::new(0, 0, 40, 24)));
+        let joins = junction_map(&areas.dividers);
+        assert_eq!(joins, HashMap::from([((40, 24), "┴")]));
+
+        let folded = screen(Some(&layout), Some(7), &[7], Rect::new(0, 0, 81, 30));
+        assert_eq!(folded.of(0), Some(Rect::new(0, 0, 40, 29)));
+        assert_eq!(folded.slivers[0].area, Rect::new(0, 29, 81, 1));
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub enum Verb {
     Split(Split),
     Solo,
     Hide,
+    Tray,
 }
 
 impl Verb {
@@ -34,6 +35,7 @@ impl Verb {
             Verb::Split(Split::Stacked) => "down",
             Verb::Solo => "solo",
             Verb::Hide => "hide",
+            Verb::Tray => "tray",
         }
     }
 
@@ -43,6 +45,7 @@ impl Verb {
             "down" => Some(Verb::Split(Split::Stacked)),
             "solo" => Some(Verb::Solo),
             "hide" => Some(Verb::Hide),
+            "tray" => Some(Verb::Tray),
             _ => None,
         }
     }
@@ -69,7 +72,7 @@ pub fn parse_args(args: &[String]) -> Option<(Verb, Vec<String>)> {
         [first] if first == "hide" => Some((Verb::Hide, Vec::new())),
         [first, ..] if first == "hide" => None,
         [first, rest @ ..] => match first.as_str() {
-            "down" | "solo" => {
+            "down" | "solo" | "tray" => {
                 let verb = Verb::from_name(first)?;
                 let rest = rest.strip_prefix(&["--".to_string()]).unwrap_or(rest);
                 Some((verb, rest.to_vec()))
@@ -212,6 +215,10 @@ mod tests {
         assert_eq!(parse_args(&args(&["down"])), Some((down, vec![])));
         assert_eq!(parse_args(&args(&["solo"])), Some((Verb::Solo, vec![])));
         assert_eq!(parse_args(&args(&["hide"])), Some((Verb::Hide, vec![])));
+        assert_eq!(
+            parse_args(&args(&["tray", "htop"])),
+            Some((Verb::Tray, args(&["htop"])))
+        );
         assert_eq!(
             parse_args(&args(&["claude", "--resume"])),
             Some((right, args(&["claude", "--resume"])))
