@@ -22,12 +22,13 @@ use signal_hook::consts::{SIGHUP, SIGTERM, SIGWINCH};
 use signal_hook::iterator::Signals;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
-use input::{Arrow, Scanner, Token};
-use pane::Pane;
+use input::{AltKey, Scanner, Token};
+use pane::{Pane, Scroll};
 use terminal::InputModes;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ESC_TIMEOUT: Duration = Duration::from_millis(10);
+const CHROME_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
 
 pub enum Event {
     Input(Vec<u8>),
@@ -45,10 +46,10 @@ enum Split {
 }
 
 impl Split {
-    fn focus_target(self, arrow: Arrow) -> Option<usize> {
-        match (self, arrow) {
-            (Split::SideBySide, Arrow::Left) | (Split::Stacked, Arrow::Up) => Some(0),
-            (Split::SideBySide, Arrow::Right) | (Split::Stacked, Arrow::Down) => Some(1),
+    fn focus_target(self, key: AltKey) -> Option<usize> {
+        match (self, key) {
+            (Split::SideBySide, AltKey::Left) | (Split::Stacked, AltKey::Up) => Some(0),
+            (Split::SideBySide, AltKey::Right) | (Split::Stacked, AltKey::Down) => Some(1),
             _ => None,
         }
     }
@@ -89,27 +90,33 @@ struct App {
 }
 
 impl App {
-    fn handle_input(&mut self, bytes: &[u8]) -> bool {
-        let mut focus_changed = false;
+    fn handle_input(&mut self, bytes: &[u8]) {
         for token in self.scanner.feed(bytes) {
             match token {
                 Token::Bytes(bytes) => self.write_focused(&bytes),
-                Token::AltArrow(arrow) => {
-                    match self
-                        .split
-                        .focus_target(arrow)
-                        .filter(|_| self.panes.len() == 2)
-                    {
-                        Some(target) => {
-                            focus_changed |= target != self.focus;
-                            self.focus = target;
-                        }
-                        None => self.write_focused(arrow.bytes()),
-                    }
-                }
+                Token::AltKey(key) => self.handle_alt_key(key),
             }
         }
-        focus_changed
+    }
+
+    fn handle_alt_key(&mut self, key: AltKey) {
+        if self.panes.len() == 2
+            && let Some(target) = self.split.focus_target(key)
+        {
+            self.focus = target;
+            return;
+        }
+        let scroll = match key {
+            AltKey::PageUp => Some(Scroll::Up),
+            AltKey::PageDown => Some(Scroll::Down),
+            _ => None,
+        };
+        if let Some(scroll) = scroll
+            && self.panes[self.focus].scroll(scroll)
+        {
+            return;
+        }
+        self.write_focused(key.bytes());
     }
 
     fn write_focused(&mut self, bytes: &[u8]) {
@@ -145,19 +152,32 @@ impl App {
                 let widget = PseudoTerminal::new(parser.screen())
                     .cursor(Cursor::default().visibility(false));
                 frame.render_widget(widget, *pane_area);
+                let scrolled = parser.screen().scrollback();
+                if scrolled > 0 {
+                    let label = format!("+{scrolled}");
+                    let width = u16::try_from(label.len()).unwrap_or(u16::MAX);
+                    if width <= pane_area.width {
+                        frame.buffer_mut().set_string(
+                            pane_area.right() - width,
+                            pane_area.y,
+                            label,
+                            CHROME_STYLE,
+                        );
+                    }
+                }
             }
             if let Some(divider) = divider {
                 let buf = frame.buffer_mut();
                 for position in divider.positions() {
                     buf[position]
                         .set_symbol(split.divider_symbol())
-                        .set_style(Style::new().add_modifier(Modifier::DIM));
+                        .set_style(CHROME_STYLE);
                 }
             }
             let parser = panes[*focus].parser();
             let screen = parser.screen();
             let focused_area = pane_areas[*focus];
-            if !screen.hide_cursor() {
+            if !screen.hide_cursor() && screen.scrollback() == 0 {
                 let (row, col) = screen.cursor_position();
                 frame.set_cursor_position((
                     focused_area.x + col.min(focused_area.width.saturating_sub(1)),
@@ -297,7 +317,8 @@ fn event_loop(app: &mut App, receiver: Receiver<Event>) -> Result<()> {
 
         match event {
             Event::Input(bytes) => {
-                needs_draw |= app.handle_input(&bytes);
+                app.handle_input(&bytes);
+                needs_draw = true;
                 esc_deadline = app
                     .scanner
                     .has_pending()

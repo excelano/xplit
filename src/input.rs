@@ -1,33 +1,34 @@
 // Author: David M. Anderson
 // Built with AI assistance (Claude, Anthropic)
 
-const ALT_ARROW_PREFIX: &[u8] = b"\x1b[1;3";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Arrow {
+pub enum AltKey {
     Up,
     Down,
     Right,
     Left,
+    PageUp,
+    PageDown,
 }
 
-impl Arrow {
-    fn from_final_byte(byte: u8) -> Option<Arrow> {
-        match byte {
-            b'A' => Some(Arrow::Up),
-            b'B' => Some(Arrow::Down),
-            b'C' => Some(Arrow::Right),
-            b'D' => Some(Arrow::Left),
-            _ => None,
-        }
-    }
+impl AltKey {
+    const ALL: [AltKey; 6] = [
+        AltKey::Up,
+        AltKey::Down,
+        AltKey::Right,
+        AltKey::Left,
+        AltKey::PageUp,
+        AltKey::PageDown,
+    ];
 
     pub fn bytes(self) -> &'static [u8] {
         match self {
-            Arrow::Up => b"\x1b[1;3A",
-            Arrow::Down => b"\x1b[1;3B",
-            Arrow::Right => b"\x1b[1;3C",
-            Arrow::Left => b"\x1b[1;3D",
+            AltKey::Up => b"\x1b[1;3A",
+            AltKey::Down => b"\x1b[1;3B",
+            AltKey::Right => b"\x1b[1;3C",
+            AltKey::Left => b"\x1b[1;3D",
+            AltKey::PageUp => b"\x1b[5;3~",
+            AltKey::PageDown => b"\x1b[6;3~",
         }
     }
 }
@@ -35,7 +36,7 @@ impl Arrow {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Token {
     Bytes(Vec<u8>),
-    AltArrow(Arrow),
+    AltKey(AltKey),
 }
 
 #[derive(Default)]
@@ -54,15 +55,17 @@ impl Scanner {
         while i < buf.len() {
             if buf[i] == 0x1b {
                 let rest = &buf[i..];
-                if rest.len() > ALT_ARROW_PREFIX.len() && rest.starts_with(ALT_ARROW_PREFIX) {
-                    if let Some(arrow) = Arrow::from_final_byte(rest[ALT_ARROW_PREFIX.len()]) {
-                        push_bytes(&mut tokens, &buf[run_start..i]);
-                        tokens.push(Token::AltArrow(arrow));
-                        i += ALT_ARROW_PREFIX.len() + 1;
-                        run_start = i;
-                        continue;
-                    }
-                } else if ALT_ARROW_PREFIX.starts_with(rest) {
+                if let Some(key) = AltKey::ALL
+                    .into_iter()
+                    .find(|k| rest.starts_with(k.bytes()))
+                {
+                    push_bytes(&mut tokens, &buf[run_start..i]);
+                    tokens.push(Token::AltKey(key));
+                    i += key.bytes().len();
+                    run_start = i;
+                    continue;
+                }
+                if AltKey::ALL.iter().any(|k| k.bytes().starts_with(rest)) {
                     push_bytes(&mut tokens, &buf[run_start..i]);
                     self.pending = rest.to_vec();
                     return tokens;
@@ -98,16 +101,16 @@ mod tests {
             .iter()
             .flat_map(|token| match token {
                 Token::Bytes(bytes) => bytes.clone(),
-                Token::AltArrow(arrow) => arrow.bytes().to_vec(),
+                Token::AltKey(key) => key.bytes().to_vec(),
             })
             .collect()
     }
 
-    fn arrows(tokens: &[Token]) -> Vec<Arrow> {
+    fn alt_keys(tokens: &[Token]) -> Vec<AltKey> {
         tokens
             .iter()
             .filter_map(|token| match token {
-                Token::AltArrow(arrow) => Some(*arrow),
+                Token::AltKey(key) => Some(*key),
                 Token::Bytes(_) => None,
             })
             .collect()
@@ -133,44 +136,46 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_each_alt_arrow() {
-        for arrow in [Arrow::Up, Arrow::Down, Arrow::Right, Arrow::Left] {
+    fn recognizes_each_alt_key() {
+        for key in AltKey::ALL {
             let mut scanner = Scanner::default();
-            assert_eq!(scanner.feed(arrow.bytes()), vec![Token::AltArrow(arrow)]);
+            assert_eq!(scanner.feed(key.bytes()), vec![Token::AltKey(key)]);
         }
     }
 
     #[test]
-    fn alt_arrow_between_text() {
+    fn alt_keys_between_text() {
         let mut scanner = Scanner::default();
         assert_eq!(
-            scanner.feed(b"ab\x1b[1;3Dcd\x1b[1;3C"),
+            scanner.feed(b"ab\x1b[1;3Dcd\x1b[5;3~"),
             vec![
                 Token::Bytes(b"ab".to_vec()),
-                Token::AltArrow(Arrow::Left),
+                Token::AltKey(AltKey::Left),
                 Token::Bytes(b"cd".to_vec()),
-                Token::AltArrow(Arrow::Right),
+                Token::AltKey(AltKey::PageUp),
             ]
         );
     }
 
     #[test]
     fn sequence_split_at_every_point() {
-        let input = b"x\x1b[1;3Ay";
-        for split in 0..=input.len() {
-            let (tokens, leftover) = feed_chunks(&[&input[..split], &input[split..]]);
-            assert_eq!(arrows(&tokens), vec![Arrow::Up], "split at {split}");
-            assert_eq!(reassemble(&tokens), input, "split at {split}");
-            assert!(leftover.is_empty());
+        for key in AltKey::ALL {
+            let input = [b"x", key.bytes(), b"y"].concat();
+            for split in 0..=input.len() {
+                let (tokens, leftover) = feed_chunks(&[&input[..split], &input[split..]]);
+                assert_eq!(alt_keys(&tokens), vec![key], "{key:?} split at {split}");
+                assert_eq!(reassemble(&tokens), input, "{key:?} split at {split}");
+                assert!(leftover.is_empty());
+            }
         }
     }
 
     #[test]
     fn sequence_split_one_byte_per_read() {
-        let input = b"\x1b[1;3B";
+        let input = AltKey::PageDown.bytes();
         let chunks: Vec<&[u8]> = input.chunks(1).collect();
         let (tokens, leftover) = feed_chunks(&chunks);
-        assert_eq!(tokens, vec![Token::AltArrow(Arrow::Down)]);
+        assert_eq!(tokens, vec![Token::AltKey(AltKey::PageDown)]);
         assert!(leftover.is_empty());
     }
 
@@ -187,7 +192,12 @@ mod tests {
     fn partial_prefix_followed_by_other_bytes_passes_through() {
         let (tokens, leftover) = feed_chunks(&[b"\x1b[1;", b"5D"]);
         assert_eq!(reassemble(&tokens), b"\x1b[1;5D");
-        assert!(arrows(&tokens).is_empty());
+        assert!(alt_keys(&tokens).is_empty());
+        assert!(leftover.is_empty());
+
+        let (tokens, leftover) = feed_chunks(&[b"\x1b[5", b"~"]);
+        assert_eq!(reassemble(&tokens), b"\x1b[5~");
+        assert!(alt_keys(&tokens).is_empty());
         assert!(leftover.is_empty());
     }
 
@@ -212,22 +222,27 @@ mod tests {
             b"\x1b[1;3~",
             b"\x1b[1;33D",
             b"\x1b\x1b[D",
+            b"\x1b[5~",
+            b"\x1b[6~",
+            b"\x1b[5;5~",
+            b"\x1b[6;2~",
+            b"\x1b[5;3A",
             b"\x1b[200~text\x1b[201~",
         ];
         for input in similar {
             let (tokens, leftover) = feed_chunks(&[input]);
-            assert!(arrows(&tokens).is_empty(), "{input:?}");
+            assert!(alt_keys(&tokens).is_empty(), "{input:?}");
             assert_eq!(reassemble(&tokens), *input, "{input:?}");
             assert!(leftover.is_empty(), "{input:?}");
         }
     }
 
     #[test]
-    fn meta_esc_before_alt_arrow() {
+    fn meta_esc_before_alt_key() {
         let mut scanner = Scanner::default();
         assert_eq!(
             scanner.feed(b"\x1b\x1b[1;3D"),
-            vec![Token::Bytes(b"\x1b".to_vec()), Token::AltArrow(Arrow::Left)]
+            vec![Token::Bytes(b"\x1b".to_vec()), Token::AltKey(AltKey::Left)]
         );
     }
 

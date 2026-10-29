@@ -12,6 +12,14 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::Event;
 
+const SCROLLBACK_LINES: usize = 10_000;
+
+#[derive(Clone, Copy)]
+pub enum Scroll {
+    Up,
+    Down,
+}
+
 pub struct Pane {
     pub id: usize,
     size: (u16, u16),
@@ -37,7 +45,11 @@ impl Pane {
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(size.0, size.1, 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            size.0,
+            size.1,
+            SCROLLBACK_LINES,
+        )));
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
@@ -71,6 +83,7 @@ impl Pane {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        self.parser().screen_mut().set_scrollback(0);
         let _ = self
             .writer
             .write_all(bytes)
@@ -88,6 +101,21 @@ impl Pane {
             .screen_mut()
             .set_size(size.0, size.1);
         let _ = self.master.resize(pty_size(size));
+    }
+
+    pub fn scroll(&mut self, scroll: Scroll) -> bool {
+        let mut parser = self.parser();
+        let screen = parser.screen_mut();
+        if screen.alternate_screen() {
+            return false;
+        }
+        let page = usize::from(self.size.0);
+        let offset = match scroll {
+            Scroll::Up => screen.scrollback() + page,
+            Scroll::Down => screen.scrollback().saturating_sub(page),
+        };
+        screen.set_scrollback(offset);
+        true
     }
 
     pub fn parser(&self) -> MutexGuard<'_, vt100::Parser> {
