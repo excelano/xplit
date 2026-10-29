@@ -42,8 +42,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ESC_TIMEOUT: Duration = Duration::from_millis(10);
 const CHROME_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
 const CTRL_C: u8 = 0x03;
-const USAGE: &str =
-    "usage: xplit [down | solo] [command [args...]]\n       xplit -- command [args...]";
+const HIDE_OUTSIDE: &str = "hide only works inside xplit";
+const USAGE: &str = "usage: xplit [down | solo] [command [args...]]\n       xplit hide\n       xplit -- command [args...]";
 
 pub enum Event {
     Input(Vec<u8>),
@@ -59,6 +59,7 @@ pub enum Event {
 struct App {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     layout: Option<Node>,
+    hidden: Vec<usize>,
     panes: Vec<Pane>,
     focus: usize,
     scanner: Scanner,
@@ -73,6 +74,7 @@ struct App {
 impl App {
     fn start(&mut self, request: &Request) -> Result<()> {
         match request.verb {
+            Verb::Hide => bail!(HIDE_OUTSIDE),
             Verb::Solo => self.open(request, &request.command, None),
             Verb::Split(split) => {
                 self.open(request, &[], None)?;
@@ -124,6 +126,7 @@ impl App {
     fn handle_request(&mut self, request: Request) -> Result<(), String> {
         match request.verb {
             Verb::Solo => Err("already running inside xplit".to_string()),
+            Verb::Hide => self.hide(request.pane.unwrap_or(self.focus)),
             Verb::Split(split) => {
                 let target = request
                     .pane
@@ -136,10 +139,56 @@ impl App {
         }
     }
 
+    fn hide(&mut self, id: usize) -> Result<(), String> {
+        let visible = self
+            .panes
+            .iter()
+            .filter(|pane| pane.id != id && !self.hidden.contains(&pane.id))
+            .count();
+        if visible == 0 {
+            return Err("cannot hide the only visible pane".to_string());
+        }
+        let hidden_area = self.current_areas().of(id);
+        self.hidden.push(id);
+        if self.selection.is_some_and(|selection| selection.pane == id) {
+            self.selection = None;
+        }
+        if self.focus == id {
+            self.focus_where(hidden_area);
+        }
+        Ok(())
+    }
+
+    fn restore(&mut self, id: usize) {
+        let Some(group) = self
+            .current_areas()
+            .sliver_holding(id)
+            .map(|sliver| sliver.panes.clone())
+        else {
+            return;
+        };
+        let latest = self
+            .hidden
+            .iter()
+            .rev()
+            .find(|hidden| group.contains(hidden))
+            .copied();
+        self.hidden.retain(|hidden| !group.contains(hidden));
+        self.focus = latest.unwrap_or(id);
+    }
+
+    fn focus_where(&mut self, area: Option<Rect>) {
+        let areas = self.current_areas();
+        let successor = area
+            .and_then(|area| areas.at(area.as_position()))
+            .or_else(|| areas.panes.first().copied());
+        self.focus = successor.map_or(0, |(id, _)| id);
+    }
+
     fn current_areas(&self) -> Areas {
         self.layout
             .as_ref()
-            .map(|layout| layout.areas(self.area))
+            .map(|layout| layout.areas(self.area, &self.hidden))
             .unwrap_or_default()
     }
 
@@ -173,7 +222,11 @@ impl App {
     fn handle_alt_key(&mut self, key: AltKey) {
         let anchor = self.cursor_position();
         if let Some(target) = layout::neighbor(&self.areas, self.focus, key, anchor) {
-            self.focus = target;
+            if self.hidden.contains(&target) {
+                self.restore(target);
+            } else {
+                self.focus = target;
+            }
             return;
         }
         let Some(pane) = self.focused() else {
@@ -205,7 +258,14 @@ impl App {
                 _ => {}
             }
         }
-        let Some((id, area)) = self.areas.at(Position::new(mouse.col, mouse.row)) else {
+        let position = Position::new(mouse.col, mouse.row);
+        if kind == MouseKind::Press(Button::Left)
+            && let Some(sliver) = self.areas.sliver_at(position)
+        {
+            let id = sliver.panes[0];
+            return self.restore(id);
+        }
+        let Some((id, area)) = self.areas.at(position) else {
             return;
         };
         let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == id) else {
@@ -288,14 +348,19 @@ impl App {
         let closed_area = self.areas.of(id);
         self.panes.remove(index).reap();
         self.layout = self.layout.take().and_then(|layout| layout.without(id));
+        self.hidden.retain(|hidden| *hidden != id);
+        if self.layout.as_ref().is_some_and(|layout| {
+            layout
+                .leaves()
+                .iter()
+                .all(|leaf| self.hidden.contains(leaf))
+        }) {
+            self.hidden.clear();
+        }
         self.selection = None;
         self.selecting = false;
         if self.focus == id {
-            let areas = self.current_areas();
-            let successor = closed_area
-                .and_then(|area| areas.at(area.as_position()))
-                .or_else(|| areas.panes.first().copied());
-            self.focus = successor.map_or(0, |(id, _)| id);
+            self.focus_where(closed_area);
         }
     }
 
@@ -307,6 +372,7 @@ impl App {
         let App {
             terminal,
             layout,
+            hidden,
             panes,
             focus,
             area: stored_area,
@@ -319,7 +385,7 @@ impl App {
         terminal.draw(|frame| {
             let areas = layout
                 .as_ref()
-                .map(|layout| layout.areas(frame.area()))
+                .map(|layout| layout.areas(frame.area(), hidden))
                 .unwrap_or_default();
             for &(id, pane_area) in &areas.panes {
                 let Some(pane) = panes.iter_mut().find(|pane| pane.id == id) else {
@@ -361,6 +427,13 @@ impl App {
                 for position in divider.positions() {
                     buf[position]
                         .set_symbol(split.divider_symbol())
+                        .set_style(CHROME_STYLE);
+                }
+            }
+            for sliver in &areas.slivers {
+                for position in sliver.area.positions() {
+                    buf[position]
+                        .set_symbol(sliver.split.sliver_symbol())
                         .set_style(CHROME_STYLE);
                 }
             }
@@ -430,6 +503,10 @@ fn main() -> ExitCode {
             Err(_) => {}
         }
     }
+    if verb == Verb::Hide {
+        eprintln!("xplit: {HIDE_OUTSIDE}");
+        return ExitCode::FAILURE;
+    }
 
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -474,6 +551,7 @@ fn run(request: &Request) -> Result<()> {
     let mut app = App {
         terminal,
         layout: None,
+        hidden: Vec::new(),
         panes: Vec::new(),
         focus: 0,
         scanner: Scanner::default(),

@@ -18,6 +18,7 @@ xplit down             # two panes stacked top and bottom
 xplit solo             # one pane, ready to split
 xplit claude           # a shell on the left, claude on the right
 xplit down htop        # a shell on top, htop below
+xplit hide             # inside xplit: fold away the pane you typed it in
 xplit -- down          # run a program that happens to be called down
 ```
 
@@ -27,13 +28,15 @@ Each pane runs `$SHELL` (or `/bin/bash` when it is unset) with `TERM=xterm-256co
 
 Typed in one of its own panes, `xplit` does not start a second copy. It asks the xplit it is running in to split the pane you typed in: that pane stays on the left (or on top, with `down`), and the new pane opens beside it with the focus, in the directory and with the environment of the shell you typed in. A command after the verb runs in the new pane, so `xplit claude` from inside a pane opens Claude Code next to it. Any pane can be split again, in either direction, so a screen can hold as many panes as fit; xplit refuses a split that would leave a half too small to use. `xplit solo` refuses because you are already in xplit.
 
+`xplit hide` folds the pane you typed it in down to a dim dashed line (`┆` or `┄`) along its edge, and the pane beside it takes the space. What runs in a hidden pane keeps running at the size it had, so it never sees a resize. Alt+arrow toward the dashed line, or a click on it, brings the pane back with the focus. When both halves of a split are hidden they fold into one line and come back together. The last visible pane cannot be hidden.
+
 To have a window that starts in xplit without changing every terminal, give GNOME Terminal a second profile (Preferences, then the + beside Profiles) whose Command tab runs `xplit solo` as a custom command instead of the shell, and open it from the new-tab menu or with `gnome-terminal --profile=<name>`. It looks like an ordinary shell until you type `xplit`.
 
 ## Keys
 
 | Keys                      | Action                                          |
 |---------------------------|-------------------------------------------------|
-| Alt+arrow                 | focus the next pane in that direction           |
+| Alt+arrow                 | focus the next pane in that direction, or bring back a hidden one |
 | Alt+PageUp / Alt+PageDown | scroll the focused pane back or forward a page  |
 
 Alt+arrow moves to the nearest pane on that side, and where several panes border it, to the one level with the cursor. When there is no pane in that direction, the key goes to the program in the focused pane, so Alt+arrows still reach the shell whenever they have nowhere to move. Every other key goes to the focused pane unchanged, including Ctrl+C, Ctrl+Z, Esc and bracketed paste. Only the focused pane shows a cursor.

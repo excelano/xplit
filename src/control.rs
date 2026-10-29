@@ -24,6 +24,7 @@ const OK: &str = "ok";
 pub enum Verb {
     Split(Split),
     Solo,
+    Hide,
 }
 
 impl Verb {
@@ -32,6 +33,7 @@ impl Verb {
             Verb::Split(Split::SideBySide) => "right",
             Verb::Split(Split::Stacked) => "down",
             Verb::Solo => "solo",
+            Verb::Hide => "hide",
         }
     }
 
@@ -40,6 +42,7 @@ impl Verb {
             "right" => Some(Verb::Split(Split::SideBySide)),
             "down" => Some(Verb::Split(Split::Stacked)),
             "solo" => Some(Verb::Solo),
+            "hide" => Some(Verb::Hide),
             _ => None,
         }
     }
@@ -63,6 +66,8 @@ pub fn parse_args(args: &[String]) -> Option<(Verb, Vec<String>)> {
             (!rest.is_empty()).then(|| (Verb::Split(Split::SideBySide), rest.to_vec()))
         }
         [first, ..] if first.starts_with('-') => None,
+        [first] if first == "hide" => Some((Verb::Hide, Vec::new())),
+        [first, ..] if first == "hide" => None,
         [first, rest @ ..] => match first.as_str() {
             "down" | "solo" => {
                 let verb = Verb::from_name(first)?;
@@ -206,6 +211,7 @@ mod tests {
         assert_eq!(parse_args(&[]), Some((right, vec![])));
         assert_eq!(parse_args(&args(&["down"])), Some((down, vec![])));
         assert_eq!(parse_args(&args(&["solo"])), Some((Verb::Solo, vec![])));
+        assert_eq!(parse_args(&args(&["hide"])), Some((Verb::Hide, vec![])));
         assert_eq!(
             parse_args(&args(&["claude", "--resume"])),
             Some((right, args(&["claude", "--resume"])))
@@ -229,6 +235,7 @@ mod tests {
         assert_eq!(parse_args(&args(&["--help"])), None);
         assert_eq!(parse_args(&args(&["-x", "vim"])), None);
         assert_eq!(parse_args(&args(&["--"])), None);
+        assert_eq!(parse_args(&args(&["hide", "vim"])), None);
     }
 
     #[test]

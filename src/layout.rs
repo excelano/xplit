@@ -34,6 +34,26 @@ impl Split {
             .all(|half| half.width >= MIN_WIDTH && half.height >= MIN_HEIGHT)
     }
 
+    fn peel(self, area: Rect, at_start: bool) -> (Rect, Rect) {
+        let constraints = if at_start {
+            [Constraint::Length(1), Constraint::Fill(1)]
+        } else {
+            [Constraint::Fill(1), Constraint::Length(1)]
+        };
+        let [a, b] = match self {
+            Split::SideBySide => Layout::horizontal(constraints).areas(area),
+            Split::Stacked => Layout::vertical(constraints).areas(area),
+        };
+        if at_start { (a, b) } else { (b, a) }
+    }
+
+    pub fn sliver_symbol(self) -> &'static str {
+        match self {
+            Split::SideBySide => "┆",
+            Split::Stacked => "┄",
+        }
+    }
+
     pub fn divider_symbol(self) -> &'static str {
         match self {
             Split::SideBySide => "│",
@@ -52,10 +72,18 @@ pub enum Node {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sliver {
+    pub panes: Vec<usize>,
+    pub split: Split,
+    pub area: Rect,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Areas {
     pub panes: Vec<(usize, Rect)>,
     pub dividers: Vec<(Split, Rect)>,
+    pub slivers: Vec<Sliver>,
 }
 
 impl Areas {
@@ -72,29 +100,81 @@ impl Areas {
             .copied()
             .find(|(_, area)| area.contains(position))
     }
+
+    pub fn sliver_at(&self, position: Position) -> Option<&Sliver> {
+        self.slivers
+            .iter()
+            .find(|sliver| sliver.area.contains(position))
+    }
+
+    pub fn sliver_holding(&self, id: usize) -> Option<&Sliver> {
+        self.slivers
+            .iter()
+            .find(|sliver| sliver.panes.contains(&id))
+    }
 }
 
 impl Node {
-    pub fn areas(&self, area: Rect) -> Areas {
+    pub fn areas(&self, area: Rect, hidden: &[usize]) -> Areas {
         let mut areas = Areas::default();
-        self.collect(area, &mut areas);
+        self.collect(area, hidden, &mut areas);
         areas
     }
 
-    fn collect(&self, area: Rect, areas: &mut Areas) {
-        match self {
-            Node::Pane(id) => areas.panes.push((*id, area)),
-            Node::Split {
-                split,
-                first,
-                second,
-            } => {
+    fn collect(&self, area: Rect, hidden: &[usize], areas: &mut Areas) {
+        let Node::Split {
+            split,
+            first,
+            second,
+        } = self
+        else {
+            if let Node::Pane(id) = self {
+                areas.panes.push((*id, area));
+            }
+            return;
+        };
+        match (first.is_hidden(hidden), second.is_hidden(hidden)) {
+            (false, false) => {
                 let [first_area, divider, second_area] = split.halves(area);
-                first.collect(first_area, areas);
+                first.collect(first_area, hidden, areas);
                 areas.dividers.push((*split, divider));
-                second.collect(second_area, areas);
+                second.collect(second_area, hidden, areas);
+            }
+            (true, true) => areas.slivers.push(Sliver {
+                panes: self.leaves(),
+                split: *split,
+                area,
+            }),
+            (first_hidden, _) => {
+                let (folded, open) = if first_hidden {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                let (sliver, rest) = split.peel(area, first_hidden);
+                areas.slivers.push(Sliver {
+                    panes: folded.leaves(),
+                    split: *split,
+                    area: sliver,
+                });
+                open.collect(rest, hidden, areas);
             }
         }
+    }
+
+    pub fn leaves(&self) -> Vec<usize> {
+        match self {
+            Node::Pane(id) => vec![*id],
+            Node::Split { first, second, .. } => {
+                let mut leaves = first.leaves();
+                leaves.extend(second.leaves());
+                leaves
+            }
+        }
+    }
+
+    fn is_hidden(&self, hidden: &[usize]) -> bool {
+        self.leaves().iter().all(|id| hidden.contains(id))
     }
 
     pub fn split(&mut self, target: usize, split: Split, new: usize) -> bool {
@@ -153,11 +233,17 @@ pub fn neighbor(areas: &Areas, from: usize, key: AltKey, anchor: Position) -> Op
         }
     };
     let (origin_start, origin_end, _) = across(origin);
+    let slivers = areas
+        .slivers
+        .iter()
+        .map(|sliver| (sliver.panes[0], sliver.area));
     areas
         .panes
         .iter()
+        .copied()
+        .chain(slivers)
         .filter(|(id, _)| *id != from)
-        .filter_map(|&(id, area)| {
+        .filter_map(|(id, area)| {
             let gap = ahead(area)?;
             let (start, end, anchor) = across(area);
             let overlap = end.min(origin_end).saturating_sub(start.max(origin_start));
@@ -182,7 +268,7 @@ mod tests {
     #[test]
     fn splits_the_target_pane_only() {
         let layout = quad();
-        let areas = layout.areas(Rect::new(0, 0, 81, 21));
+        let areas = layout.areas(Rect::new(0, 0, 81, 21), &[]);
         assert_eq!(areas.of(0), Some(Rect::new(0, 0, 40, 10)));
         assert_eq!(areas.of(2), Some(Rect::new(0, 11, 40, 10)));
         assert_eq!(areas.of(1), Some(Rect::new(41, 0, 40, 10)));
@@ -193,7 +279,7 @@ mod tests {
     #[test]
     fn removing_a_pane_gives_its_space_to_the_sibling() {
         let layout = quad().without(2).unwrap();
-        let areas = layout.areas(Rect::new(0, 0, 81, 21));
+        let areas = layout.areas(Rect::new(0, 0, 81, 21), &[]);
         assert_eq!(areas.of(0), Some(Rect::new(0, 0, 40, 21)));
         assert_eq!(areas.of(2), None);
         assert_eq!(Node::Pane(5).without(5), None);
@@ -201,7 +287,7 @@ mod tests {
 
     #[test]
     fn neighbor_moves_geometrically() {
-        let areas = quad().areas(Rect::new(0, 0, 81, 21));
+        let areas = quad().areas(Rect::new(0, 0, 81, 21), &[]);
         let top_left = Position::new(0, 0);
         assert_eq!(neighbor(&areas, 0, AltKey::Right, top_left), Some(1));
         assert_eq!(neighbor(&areas, 0, AltKey::Down, top_left), Some(2));
@@ -218,7 +304,7 @@ mod tests {
         let mut layout = Node::Pane(0);
         layout.split(0, Split::SideBySide, 1);
         layout.split(1, Split::Stacked, 2);
-        let areas = layout.areas(Rect::new(0, 0, 81, 21));
+        let areas = layout.areas(Rect::new(0, 0, 81, 21), &[]);
         assert_eq!(
             neighbor(&areas, 0, AltKey::Right, Position::new(5, 3)),
             Some(1)
@@ -227,6 +313,45 @@ mod tests {
             neighbor(&areas, 0, AltKey::Right, Position::new(5, 18)),
             Some(2)
         );
+    }
+
+    #[test]
+    fn hidden_pane_folds_to_a_sliver_at_its_edge() {
+        let mut layout = Node::Pane(0);
+        layout.split(0, Split::SideBySide, 1);
+        let areas = layout.areas(Rect::new(0, 0, 81, 21), &[1]);
+        assert_eq!(areas.of(0), Some(Rect::new(0, 0, 80, 21)));
+        assert_eq!(areas.of(1), None);
+        assert!(areas.dividers.is_empty());
+        let sliver = &areas.slivers[0];
+        assert_eq!(
+            (sliver.panes.clone(), sliver.area),
+            (vec![1], Rect::new(80, 0, 1, 21))
+        );
+
+        let areas = layout.areas(Rect::new(0, 0, 81, 21), &[0]);
+        assert_eq!(areas.of(1), Some(Rect::new(1, 0, 80, 21)));
+        assert_eq!(areas.slivers[0].area, Rect::new(0, 0, 1, 21));
+    }
+
+    #[test]
+    fn a_fully_hidden_split_folds_as_one_group() {
+        let areas = quad().areas(Rect::new(0, 0, 81, 21), &[1, 3]);
+        assert_eq!(areas.slivers.len(), 1);
+        assert_eq!(areas.slivers[0].panes, vec![1, 3]);
+        assert_eq!(areas.of(0), Some(Rect::new(0, 0, 80, 10)));
+    }
+
+    #[test]
+    fn neighbor_reaches_a_sliver() {
+        let mut layout = Node::Pane(0);
+        layout.split(0, Split::SideBySide, 1);
+        let areas = layout.areas(Rect::new(0, 0, 81, 21), &[1]);
+        assert_eq!(
+            neighbor(&areas, 0, AltKey::Right, Position::new(0, 0)),
+            Some(1)
+        );
+        assert_eq!(neighbor(&areas, 0, AltKey::Left, Position::new(0, 0)), None);
     }
 
     #[test]
