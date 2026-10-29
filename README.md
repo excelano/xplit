@@ -1,13 +1,31 @@
 # xplit
 
-xplit splits one terminal window into two shells and does nothing else. There is no prefix key, no status bar, no configuration and no sessions to manage, so the only thing between you and the shells is a dim one-character divider. It is for the moment you want a second shell next to the first without reaching for tmux and its keybindings.
+xplit splits one terminal window into shells side by side or stacked, and splits those again. There is no prefix key, no status bar, no configuration and no sessions to manage, so the only thing between you and the shells is a dim one-character divider. It is for the moment you want a second shell next to the first without reaching for tmux and its keybindings, and typing `xplit` again is how you split.
 
 It runs on Linux and is built against GNOME Terminal.
 
 ## Install
 
+### Debian and Ubuntu
+
+Add the [Excelano apt repository](https://excelano.com/apt/) once:
+
 ```sh
-cargo install --path .
+curl -fsSL https://excelano.com/apt/setup.sh | sudo sh
+```
+
+Then install it, so `apt upgrade` keeps it current:
+
+```sh
+sudo apt install xplit
+```
+
+Both amd64 and arm64 packages ship with every release. The package recommends `wl-clipboard` or `xclip`, which xplit uses for copying and pasting.
+
+### crates.io
+
+```sh
+cargo install xplit
 ```
 
 ## Usage
