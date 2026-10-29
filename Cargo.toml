@@ -1,6 +1,6 @@
 [package]
 name = "xplit"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A minimal two-pane terminal splitter"
 authors = ["David M. Anderson"]
