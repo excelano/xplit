@@ -1,0 +1,35 @@
+[package]
+name = "xplit"
+version = "0.1.0"
+edition = "2024"
+description = "A minimal two-pane terminal splitter"
+authors = ["David M. Anderson"]
+license = "MIT"
+repository = "https://github.com/excelano/xplit"
+readme = "README.md"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+crossterm = "0.29.0"
+portable-pty = "0.9.0"
+ratatui = "0.30.2"
+signal-hook = "0.4.5"
+tui-term = "0.3.4"
+vt100 = "0.16.2"
+
+[package.metadata.deb]
+maintainer = "David M. Anderson <david.anderson@excelano.com>"
+extended-description = """
+xplit splits one terminal window into two shells, side by side or stacked, and
+does nothing else: no prefix key, no status bar, no configuration and no
+sessions. Alt+arrow keys move focus between the panes, and a pane closes when
+its shell exits."""
+section = "utils"
+priority = "optional"
+depends = "libc6, libgcc-s1"
+assets = [
+    ["target/release/xplit", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/xplit/README.md", "644"],
+    ["LICENSE", "usr/share/doc/xplit/copyright", "644"],
+]
