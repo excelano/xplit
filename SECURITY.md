@@ -8,11 +8,15 @@ Please do not open public issues for security problems.
 
 ## Supported versions
 
-The latest release receives security fixes. Older versions are not supported.
+The latest release receives security fixes. Older versions are not supported. A fix ships in a new release; update the way you installed.
 
 ## What xplit can access
 
-xplit is a terminal program that runs locally on your machine. It starts your own shell in two pseudo-terminals, passes your keystrokes to the focused one, and draws their output. It runs with your operating-system user's permissions and nothing more, makes no network calls of any kind, and reads no files of its own.
+xplit is a terminal program that runs locally on your machine. It starts your shell, or a command you name, in a pseudo-terminal for each pane, passes your keystrokes to the focused one, and draws their output. It runs with your operating-system user's permissions and nothing more, makes no network calls of any kind, and reads no files of its own.
+
+When `$XDG_RUNTIME_DIR` is set, xplit listens on a Unix control socket there, `xplit-<pid>.sock`, and removes it on exit. Each pane's environment carries `XPLIT_SOCKET`, the socket's path, and `XPLIT_PANE`, the pane's number, so that `xplit` typed inside a pane asks the running copy to split, hide or focus a pane, or open the tray, instead of starting another. A request over the socket can open a pane running any command, in any directory and environment, so any process able to connect to it can do that; the socket sits in your per-user runtime directory, which other accounts cannot enter.
+
+Copying and pasting run `wl-copy` and `wl-paste` under Wayland, or `xclip` under X11, passing the selected text to them on standard input.
 
 ## What xplit stores
 

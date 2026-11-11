@@ -81,3 +81,7 @@ Each pane keeps the last 10,000 lines that scrolled off its top. While a pane is
 ## Behavior to know about
 
 xplit reports mouse movement to programs only while a button is held, so a program that tracks the pointer as it hovers sees no hover events. The focused pane's window title and cursor shape are passed on to GNOME Terminal, and a bell in any pane rings it. Programs that query the terminal (for its cursor position or its identity) get no answer and fall back to their defaults.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
